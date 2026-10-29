@@ -1,14 +1,16 @@
 # CEP:FILE: crates/rv8_object/Cargo.toml
-# CEP:WHAT: Manifest placeholder for rv8_object; finalized by its owning implementation task.
-# CEP:WHY: Workspace members must exist before implementation lands.
+# CEP:WHAT: Manifest for rv8_object: universal object model, deterministic ELF64 writers,
+#   and the static executable linker.
+# CEP:WHY: Zero-dependency object emission is the byte-determinism product (STANDARDS 5.5).
 # CEP:CLASS: HPC-1
-# CEP:STATUS: stub
+# CEP:STATUS: complete
 # CEP:OWNER: axiomzero2
 # CEP:TICKET: RV8-100
-# CEP:FAILURE: none
-# CEP:ASSUMES: none
-# CEP:COST: cold.
-# CEP:EVIDENCE: workspace build.
+# CEP:FAILURE: none; workspace resolves members statically.
+# CEP:ASSUMES: first-party workspace dependencies only; rv8_core/rv8_ir are retained as
+#   declared edges for the future provenance/content-id plumbing of the driver pipeline.
+# CEP:COST: cold; parsed once per build.
+# CEP:EVIDENCE: cargo build -p rv8_object with zero external crates.
 [package]
 name = "rv8_object"
 version.workspace = true

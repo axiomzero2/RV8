@@ -681,19 +681,28 @@ impl HetIr {
         Ok(())
     }
 
-    /// CEP:WHAT: Checks that data edges form a DAG with an iterative Kahn pass.
-    /// CEP:WHY: Invariant analogous to SoN SSA domination; cyclic data flow is
-    /// unlowerable to LIR.
+    /// CEP:WHAT: Checks that data edges form a DAG with an iterative Kahn pass, treating
+    /// Compute(Phi) nodes as cycle-closure points whose incoming data edges carry
+    /// loop-carried values delivered by predecessor-edge copies at lowering time.
+    /// CEP:WHY: Invariant analogous to SoN SSA domination with the same loop back-edge
+    /// exception (spec 2.3.1): a data cycle is unlowerable unless every cycle passes
+    /// through a phi, which is a per-path definition rather than a combinational read.
     /// CEP:STATUS: complete
-    /// CEP:FAILURE: DataCycle naming one node on the cycle.
+    /// CEP:FAILURE: DataCycle naming one node on a cycle that contains no phi.
     /// CEP:ASSUMES: edges reference existing nodes (checked earlier in verify()).
     /// CEP:COST: O(N + E); iterative.
-    /// CEP:EVIDENCE: unit test rv8_ir::hetir::tests::het_rejects_data_cycle.
+    /// CEP:EVIDENCE: unit tests rv8_ir::hetir::tests::het_rejects_data_cycle and
+    /// het_accepts_phi_closed_data_cycle.
     fn verify_data_dag(&self, out_adj: &[Vec<usize>]) -> Result<(), HetError> {
         let mut indegree_data = vec![0u32; self.nodes.len()];
         for edge in &self.edges {
             if matches!(edge.kind, HetEdgeKind::Data { .. }) {
-                indegree_data[edge.to.0 as usize] += 1;
+                let target = edge.to.0 as usize;
+                // Phi nodes close data cycles by design: their inputs arrive as copies
+                // on the predecessor edges, so they never form a combinational read.
+                if !matches!(self.nodes[target].kind, HetKind::Compute(ComputeOp::Phi)) {
+                    indegree_data[target] += 1;
+                }
             }
         }
         let mut ready: Vec<usize> = (0..self.nodes.len())
@@ -705,6 +714,9 @@ impl HetIr {
             for &ei in &out_adj[i] {
                 if matches!(self.edges[ei].kind, HetEdgeKind::Data { .. }) {
                     let target = self.edges[ei].to.0 as usize;
+                    if matches!(self.nodes[target].kind, HetKind::Compute(ComputeOp::Phi)) {
+                        continue;
+                    }
                     indegree_data[target] -= 1;
                     if indegree_data[target] == 0 {
                         ready.push(target);

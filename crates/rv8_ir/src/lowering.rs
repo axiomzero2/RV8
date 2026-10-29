@@ -961,11 +961,13 @@ impl<'a> Flattener<'a> {
                     header_phis,
                     body_children,
                     next_body,
-                    mut latch_incoming,
+                    latch_incoming,
                     exit_incoming,
                     val_mark,
                     delta_mark,
-                    latch_mark,
+                    // The carried mark is stale after body finalize; a fresh mark is
+                    // captured below (see the re-capture comment in the else branch).
+                    latch_mark: _stale_latch_mark,
                 } => {
                     if next_body < body_children.len() && self.cur_ctrl.is_some() {
                         let child = body_children[next_body];
@@ -980,48 +982,80 @@ impl<'a> Flattener<'a> {
                             exit_incoming,
                             val_mark,
                             delta_mark,
-                            latch_mark,
+                            // Mid-body the carried mark is still exact: no truncation
+                            // has happened yet.
+                            latch_mark: _stale_latch_mark,
                         };
                         self.enter_region_or_construct(child);
                     } else {
-                        // Body finished or dead: park facts and run the latch if any
-                        // path reaches it.
-                        if let Some(c) = self.cur_ctrl {
-                            let body_delta = Flattener::cut_deltas(&self.deltas, delta_mark);
-                            latch_incoming.push(MergeIncoming {
-                                ctrl: c,
-                                deltas: body_delta,
-                            });
-                        }
-                        self.vals.truncate(val_mark);
-                        self.deltas.truncate(delta_mark);
-                        for (var, phi) in &header_phis {
-                            self.vals.push((*var, *phi));
-                            self.deltas.push((*var, *phi));
-                        }
-                        let branch_delta = Flattener::cut_deltas(&self.deltas, delta_mark);
-                        self.stack[top].phase = Phase::LoopLatchWait {
-                            header_region,
-                            branch,
-                            branch_delta,
-                            header_phis,
-                            latch_incoming,
-                            exit_incoming,
-                            val_mark,
-                            delta_mark,
-                            latch_mark,
-                        };
+                        // Body finished or dead. Live case: the latch is the SEQUENTIAL
+                        // continuation of the body, so the body's writes and control
+                        // chain into it (no parallel merge on the back-edge: a merge
+                        // here would fabricate a second, phantom path into the loop
+                        // header and destroy the loop-carried values). Dead case: park
+                        // any earlier incoming so LoopLatchWait can still close.
                         if self.cur_ctrl.is_some() {
-                            self.cur_ctrl = None;
+                            let body_delta = Flattener::cut_deltas(&self.deltas, delta_mark);
+                            self.vals.truncate(val_mark);
+                            self.deltas.truncate(delta_mark);
+                            for (var, phi) in &header_phis {
+                                self.vals.push((*var, *phi));
+                                self.deltas.push((*var, *phi));
+                            }
+                            // The branch-false exit leaves the loop at the HEADER, so
+                            // the exit values are exactly the header-phi bindings —
+                            // cut BEFORE the body rebinds join the delta log.
+                            let branch_delta = Flattener::cut_deltas(&self.deltas, delta_mark);
+                            // Rebind the body's final values so the latch reads them.
+                            for (v, n) in &body_delta {
+                                self.vals.push((*v, *n));
+                                self.deltas.push((*v, *n));
+                            }
+                            // Above this mark: exactly the latch's own writes.
+                            let latch_mark = self.deltas.len();
+                            self.stack[top].phase = Phase::LoopLatchWait {
+                                header_region,
+                                branch,
+                                branch_delta,
+                                header_phis,
+                                latch_incoming,
+                                exit_incoming,
+                                val_mark,
+                                delta_mark,
+                                latch_mark,
+                            };
+                            // open_block consumes cur_ctrl as the latch region's
+                            // control input, which is the body-to-latch edge.
                             self.open_block(latch);
                             self.stack.push(Frame {
                                 region: Some(latch),
                                 phase: Phase::RegionStmts,
                                 terminated: false,
                             });
+                        } else {
+                            self.vals.truncate(val_mark);
+                            self.deltas.truncate(delta_mark);
+                            for (var, phi) in &header_phis {
+                                self.vals.push((*var, *phi));
+                                self.deltas.push((*var, *phi));
+                            }
+                            let latch_mark = self.deltas.len();
+                            let branch_delta =
+                                Flattener::cut_deltas(&self.deltas, delta_mark);
+                            self.stack[top].phase = Phase::LoopLatchWait {
+                                header_region,
+                                branch,
+                                branch_delta,
+                                header_phis,
+                                latch_incoming,
+                                exit_incoming,
+                                val_mark,
+                                delta_mark,
+                                latch_mark,
+                            };
+                            // No path reaches the latch; LoopLatchWait finalizes with
+                            // latch_ctrl None on the next machine step.
                         }
-                        // Else: no path reaches the latch; LoopLatchWait finalizes with
-                        // latch_ctrl None on the next machine step.
                     }
                 }
                 Phase::LoopLatchWait {
@@ -1037,6 +1071,14 @@ impl<'a> Flattener<'a> {
                 } => {
                     // Delivering frame was the latch region (or the phase was reached
                     // with a dead control when the body could not reach the latch).
+                    // Back-edge values: resolve each header-phi variable NOW, before any
+                    // truncation — the binding chain is base, header phis, body writes,
+                    // latch writes, so the latest binding per variable is exactly the
+                    // value the back-edge must carry.
+                    let patch_values: Vec<(VarId, NodeId)> = header_phis
+                        .iter()
+                        .filter_map(|(v, _)| self.resolve(*v).ok().map(|n| (*v, n)))
+                        .collect();
                     let latch_ctrl = self.cur_ctrl;
                     let latch_delta = Flattener::cut_deltas(&self.deltas, latch_mark);
                     if let Some(c) = latch_ctrl {
@@ -1051,15 +1093,13 @@ impl<'a> Flattener<'a> {
                     for (var, phi) in &header_phis {
                         self.vals.push((*var, *phi));
                     }
-                    // Latch merge when more than one path reaches the latch.
+                    // Latch merge when more than one path reaches the latch (only in
+                    // degenerate shapes; the sequential latch keeps a single incoming).
                     let mut back_ctrl = latch_ctrl;
-                    let mut latch_final = latch_delta;
                     if latch_incoming.len() > 1 {
                         back_ctrl = self.build_merge(latch_incoming)?;
-                        latch_final = Flattener::cut_deltas(&self.deltas, latch_mark);
                     } else if let Some(single) = latch_incoming.into_iter().next() {
                         back_ctrl = Some(single.ctrl);
-                        latch_final = single.deltas;
                     }
                     // Back-edge: latch control returns to the header region node.
                     if let Some(lc) = back_ctrl {
@@ -1067,17 +1107,14 @@ impl<'a> Flattener<'a> {
                             n.inputs.push(lc);
                         }
                     }
-                    // Patch header phis with latch-resolved values.
-                    for (var, phi) in &header_phis {
-                        if let Some(new_val) = latch_final
-                            .iter()
-                            .rev()
-                            .find(|(v, _)| v == var)
-                            .map(|(_, n)| *n)
+                    // Patch header phis with the resolved back-edge values.
+                    for (var, new_val) in &patch_values {
+                        if let Some((_, phi)) =
+                            header_phis.iter().find(|(v, _)| v == var)
                         {
                             if let Ok(n) = self.out.node_mut(*phi) {
                                 if n.inputs.len() >= 2 {
-                                    n.inputs[1] = new_val;
+                                    n.inputs[1] = *new_val;
                                 }
                             }
                         }
@@ -1192,6 +1229,24 @@ pub fn hir_to_son(hir: &HirFunction) -> Result<SeaOfNodes, LowerError> {
         cur_block: root.0,
         next_synth: hir.regions.len() as u32,
     };
+    // Parameter entry bindings (ABI argument order): each declared parameter resolves,
+    // before any statement runs, to an Opcode::Parameter(i) node. Downstream, son_to_hetir
+    // maps these to ComputeOp::Param and the backend pre-colors them to argument registers.
+    // Binding through `bind` (not just `vals`) keeps loop/merge delta snapshots consistent:
+    // params are base bindings, so joins never phi them unless the body reassigns.
+    for (i, &var) in hir.params.iter().enumerate() {
+        let index = i as u16;
+        if i > u16::MAX as usize {
+            return Err(LowerError::UnsupportedOp { op: "param count" });
+        }
+        let ty = hir
+            .vars
+            .get(var.0 as usize)
+            .map(|v| v.ty)
+            .ok_or(LowerError::UnboundVariable { var })?;
+        let node = f.emit(Opcode::Parameter(index), ty, vec![], synth_span());
+        f.bind(var, node);
+    }
     f.run(root)?;
     f.out
         .verify_structure()

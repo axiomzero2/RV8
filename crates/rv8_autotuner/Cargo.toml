@@ -1,14 +1,18 @@
 # CEP:FILE: crates/rv8_autotuner/Cargo.toml
-# CEP:WHAT: Manifest placeholder for rv8_autotuner; finalized by its owning implementation task.
-# CEP:WHY: Workspace members must exist before implementation lands.
-# CEP:CLASS: HPC-1
-# CEP:STATUS: stub
+# CEP:WHAT: Manifest of rv8_autotuner, the ML autotuner crate (genome, CGT surrogate, acquisition,
+#   funnel, MinHash warm start, content-addressed configuration cache).
+# CEP:WHY: The workspace member must declare its first-party dependencies; only rv8_core is
+#   actually referenced today (rng, hashing); rv8_ir/rv8_middle are declared for upcoming
+#   feature-extraction integration and are harmless while unused.
+# CEP:CLASS: CEP-1
+# CEP:STATUS: complete
 # CEP:OWNER: axiomzero2
 # CEP:TICKET: RV8-100
-# CEP:FAILURE: none
-# CEP:ASSUMES: none
-# CEP:COST: cold.
-# CEP:EVIDENCE: workspace build.
+# CEP:FAILURE: none; cargo fails the build if a declared path dependency is missing.
+# CEP:ASSUMES: workspace-level version/edition/license/repository inheritance.
+# CEP:COST: cold; parsed once per build.
+# CEP:EVIDENCE: cargo build -p rv8_autotuner and cargo test -p rv8_autotuner in CI.
+# CEP:SECURITY: first-party path dependencies only; zero external crates.
 [package]
 name = "rv8_autotuner"
 version.workspace = true

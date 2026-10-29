@@ -29,7 +29,7 @@ use crate::lir::{
 };
 use crate::lowering::LowerError;
 use crate::son::{BlockId, IrType, Opcode, SeaOfNodes};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// CEP:WHAT: Classifies one Sea-of-Nodes input list into data and control positions.
 /// CEP:WHY: The flattening convention is: Region/Merge inputs are all control; Branch
@@ -112,11 +112,17 @@ pub fn son_to_hetir(son: &SeaOfNodes) -> Result<HetIr, LowerError> {
             }
         }
     }
-    // Data-consumer adjacency over live nodes, and live indegree.
+    // Data-consumer adjacency over live nodes, and live indegree. Phi nodes are
+    // cycle-closure points (loop-carried values arrive as predecessor-edge copies at
+    // LIR lowering), so data edges INTO a phi do not create ordering constraints; a
+    // data cycle through phis is legal, a phi-free cycle still rejects below.
     let mut consumers: Vec<Vec<usize>> = vec![Vec::new(); son.nodes.len()];
     let mut indegree = vec![0u32; son.nodes.len()];
     for (j, node) in son.nodes.iter().enumerate() {
         if !live[j] {
+            continue;
+        }
+        if matches!(node.opcode, Opcode::Phi) {
             continue;
         }
         let (data, _) = split_inputs(node.opcode, node.inputs.len());
@@ -279,6 +285,48 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
     for list in &mut succ {
         list.sort();
     }
+    // Reachability compaction: the flattener assigns one block id per HIR region, and
+    // structural regions (a Loop container or an unreachable arm) host no nodes, which
+    // would otherwise surface as an unterminated dead block and violate invariant 4.3.3.
+    // Keep exactly the blocks reachable from the entry (block 0) and renumber densely;
+    // successor lists of kept blocks only contain kept targets by construction.
+    let mut reach = vec![false; block_count];
+    reach[0] = true;
+    let mut stack: Vec<usize> = vec![0];
+    while let Some(b) = stack.pop() {
+        for &t in &succ[b] {
+            if !reach[t.0 as usize] {
+                reach[t.0 as usize] = true;
+                stack.push(t.0 as usize);
+            }
+        }
+    }
+    let mut remap: Vec<Option<BlockId>> = vec![None; block_count];
+    let mut next_id = 0u32;
+    for (i, &r) in reach.iter().enumerate() {
+        if r {
+            remap[i] = Some(BlockId(next_id));
+            next_id += 1;
+        }
+    }
+    let block_count = next_id as usize;
+    for list in &mut succ {
+        list.retain(|t| remap[t.0 as usize].is_some());
+        for t in list.iter_mut() {
+            if let Some(nb) = remap[t.0 as usize] {
+                *t = nb;
+            }
+        }
+        list.sort();
+    }
+    // Reindex the successor table itself: consumers index it by the NEW block ids.
+    let mut reindexed: Vec<Vec<BlockId>> = vec![Vec::new(); block_count];
+    for (old_id, list) in succ.iter().enumerate() {
+        if let Some(nb) = remap[old_id] {
+            reindexed[nb.0 as usize] = list.clone();
+        }
+    }
+    succ = reindexed;
     // Value assignment: every value-producing node receives one virtual register.
     let mut func = LirFunction::new(name);
     let mut value_of: Vec<Option<ValueId>> = vec![None; het.nodes.len()];
@@ -301,10 +349,15 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
     // Per-block instruction emission in Het node id order (a per-block subsequence of
     // the global topological order is block-topological).
     let mut blocks: Vec<Vec<LirInstruction>> = vec![Vec::new(); block_count];
+    let mut branch_succ: BTreeMap<usize, (BlockId, BlockId)> = BTreeMap::new();
     let mut zero: Option<ValueId> = None;
     for (i, node) in het.nodes.iter().enumerate() {
         let b = match node.block {
-            Some(b) => b.0 as usize,
+            // Nodes of dropped (unreachable) blocks vanish with the block.
+            Some(b) => match remap[b.0 as usize] {
+                Some(nb) => nb.0 as usize,
+                None => continue,
+            },
             None => continue,
         };
         let inputs: Vec<usize> = het
@@ -345,16 +398,9 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
                     // Parameters are pre-colored by the ABI contract before allocation;
                     // no instruction is emitted at this level.
                 }
-                ComputeOp::Phi => {
-                    let src = reg(need_input(0, "phi without inputs")?)?;
-                    blocks[b].push(LirInstruction {
-                        opcode: MachineOpcode::MovRegReg,
-                        operands: vec![src],
-                        result: Some(reg(i)?),
-                        immediate: 0,
-                        target_block: None,
-                    });
-                }
+                // Phi values are delivered by predecessor-edge copies (see the phi
+                // lowering pass after the node loop); nothing emits in the merge block.
+                ComputeOp::Phi => {}
                 ComputeOp::Add
                 | ComputeOp::Sub
                 | ComputeOp::Mul
@@ -458,9 +504,26 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
                     }
                 };
                 let cond = reg(need_input(0, "branch cond")?)?;
-                let target = *succ[b]
-                    .first()
-                    .ok_or(LowerError::UnsupportedOp { op: "branch without successor" })?;
+                // Branch convention: the LOWER-numbered successor is the TRUE arm.
+                // Machine verification requires the fallthrough arm to be the
+                // layout-next block, so when the true arm is layout-next the branch
+                // condition is inverted (jump-if-false targets the false arm) and the
+                // true arm falls through; semantics are identical.
+                let layout_next = BlockId((b + 1) as u32);
+                let (kind, target) = match succ[b].as_slice() {
+                    [t, f] if *f == layout_next => (SetKind::Ne, *t),
+                    [t, f] if *t == layout_next => (SetKind::Eq, *f),
+                    [t, _] => (SetKind::Ne, *t),
+                    _ => {
+                        return Err(LowerError::UnsupportedOp {
+                            op: "branch without two successors",
+                        })
+                    }
+                };
+                // Encoder convention: block successors are [taken, fallthrough] with
+                // the fallthrough equal to the layout-next block (spec 5.3 invariant 3).
+                let other = if succ[b][0] == target { succ[b][1] } else { succ[b][0] };
+                branch_succ.insert(b, (target, other));
                 blocks[b].push(LirInstruction {
                     opcode: MachineOpcode::CmpRegReg,
                     operands: vec![cond, z],
@@ -469,7 +532,7 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
                     target_block: None,
                 });
                 blocks[b].push(LirInstruction {
-                    opcode: MachineOpcode::Jcc(SetKind::Ne),
+                    opcode: MachineOpcode::Jcc(kind),
                     operands: Vec::new(),
                     result: None,
                     immediate: 0,
@@ -525,6 +588,124 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
             }
         }
     }
+    // Phi lowering pass: each phi [v1..vk] at a merge with control inputs [c1..ck]
+    // places `mov phi, vj` at the END of predecessor block cj on the same positional
+    // path (spec 6.3). LIR 4.3.1 relaxes single-definition for exactly these values.
+    // Constraints enforced: the merge lives in the phi block; each predecessor block
+    // has exactly one successor (no copies on branch edges); swap-shaped copy sets
+    // break through one scratch register (deterministic ready-order sequencing).
+    {
+        let reg_of = |idx: usize| -> Result<ValueId, LowerError> {
+            value_of
+                .get(idx)
+                .copied()
+                .flatten()
+                .ok_or(LowerError::UnsupportedOp { op: "missing value" })
+        };
+        let mut per_pred: BTreeMap<usize, Vec<(ValueId, ValueId)>> = BTreeMap::new();
+        for (i, node) in het.nodes.iter().enumerate() {
+            if !matches!(node.kind, HetKind::Compute(ComputeOp::Phi)) {
+                continue;
+            }
+            let b = match node.block {
+                Some(x) => x.0 as usize,
+                None => return Err(LowerError::UnsupportedOp { op: "phi without block" }),
+            };
+            let merge_index = het
+                .nodes
+                .iter()
+                .position(|n| {
+                    matches!(n.kind, HetKind::Control(ControlOp::Merge))
+                        && n.block == Some(BlockId(b as u32))
+                })
+                .ok_or(LowerError::UnsupportedOp { op: "phi without merge" })?;
+            let ctrl_inputs: Vec<usize> = het
+                .edges
+                .iter()
+                .filter(|e| e.to.0 as usize == merge_index)
+                .filter(|e| matches!(e.kind, HetEdgeKind::Control))
+                .map(|e| e.from.0 as usize)
+                .collect();
+            let data_inputs: Vec<usize> = het
+                .edges
+                .iter()
+                .filter(|e| e.to.0 as usize == i)
+                .filter(|e| matches!(e.kind, HetEdgeKind::Data { .. }))
+                .map(|e| e.from.0 as usize)
+                .collect();
+            if ctrl_inputs.len() != data_inputs.len() || data_inputs.is_empty() {
+                return Err(LowerError::UnsupportedOp { op: "phi/control arity mismatch" });
+            }
+            let dst = reg_of(i)?;
+            for (cj, vi) in ctrl_inputs.iter().zip(data_inputs.iter()) {
+                let pb = het.nodes[*cj].block.ok_or(LowerError::UnsupportedOp {
+                    op: "phi predecessor without block",
+                })?;
+                // Predecessor blocks are in the pre-compaction id space; map through
+                // the compaction remap before consulting the successor table.
+                let pbi = match remap[pb.0 as usize] {
+                    Some(nb) => nb.0 as usize,
+                    None => {
+                        return Err(LowerError::UnsupportedOp {
+                            op: "phi predecessor in unreachable block",
+                        })
+                    }
+                };
+                if pbi == b {
+                    return Err(LowerError::UnsupportedOp { op: "phi edge within one block" });
+                }
+                if succ[pbi].len() != 1 {
+                    return Err(LowerError::UnsupportedOp { op: "phi on a branch edge" });
+                }
+                let src = reg_of(*vi)?;
+                per_pred.entry(pbi).or_default().push((dst, src));
+            }
+        }
+        for (pbi, copies) in per_pred {
+            let mut pending: Vec<(ValueId, ValueId)> =
+                copies.into_iter().filter(|(d, s)| d != s).collect();
+            let mut scratch: Option<ValueId> = None;
+            let mut forced_last: Option<ValueId> = None;
+            let mut sequenced: Vec<(ValueId, ValueId)> = Vec::new();
+            while let Some(k) = pending
+                .iter()
+                .position(|(_, s)| !pending.iter().any(|(d, _)| d == s))
+            {
+                let c = pending.remove(k);
+                sequenced.push(c);
+            }
+            while !pending.is_empty() {
+                // Pure cycle: save the first source in a scratch register, redirect,
+                // and deliver the saved value to its destination after everything else.
+                let s = *scratch.get_or_insert_with(|| {
+                    func.add_value(IrType::I64, RegClassId::Gpr)
+                });
+                let (d0, s0) = pending[0];
+                sequenced.push((s, s0));
+                forced_last = Some(d0);
+                pending.remove(0);
+                while let Some(k) = pending
+                    .iter()
+                    .position(|(_, s)| !pending.iter().any(|(d, _)| d == s))
+                {
+                    let c = pending.remove(k);
+                    sequenced.push(c);
+                }
+            }
+            if let Some(d0) = forced_last {
+                sequenced.push((d0, scratch.expect("scratch set with forced_last")));
+            }
+            for (d, s) in sequenced {
+                blocks[pbi].push(LirInstruction {
+                    opcode: MachineOpcode::MovRegReg,
+                    operands: vec![s],
+                    result: Some(d),
+                    immediate: 0,
+                    target_block: None,
+                });
+            }
+        }
+    }
     // Assemble blocks with terminator synthesis (invariant 4.3.3) and use lists.
     for (bi, instrs) in blocks.into_iter().enumerate() {
         let mut list = instrs;
@@ -555,7 +736,10 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
             }
         }
         let mut block = LirBlock::new(BlockId(bi as u32));
-        block.successors = succ[bi].clone();
+        block.successors = match branch_succ.get(&bi) {
+            Some((taken, fallthrough)) => vec![*taken, *fallthrough],
+            None => succ[bi].clone(),
+        };
         for (ii, instr) in list.into_iter().enumerate() {
             for op in &instr.operands {
                 if let Some(v) = func.values.get_mut(op.0 as usize) {
@@ -698,13 +882,17 @@ pub mod tests {
                 MachineOpcode::Jmp | MachineOpcode::Jcc(_) | MachineOpcode::Ret
             ));
         }
-        // The branch block has a Jcc targeting the lower merge block.
+        // The true arm (block 1) is the layout-next block, so the branch inverts:
+        // Jcc(Eq) jumps to the else arm (2) when the condition is false, and the
+        // then arm falls through. Semantics are identical to a non-inverted branch.
         let jcc = lir.blocks[0]
             .instructions
             .iter()
             .find(|li| matches!(li.opcode, MachineOpcode::Jcc(_)))
             .expect("jcc present");
-        assert_eq!(jcc.target_block, Some(BlockId(1)));
+        assert_eq!(jcc.target_block, Some(BlockId(2)));
+        // Successors are [taken, fallthrough] with the fallthrough at layout order.
+        assert_eq!(lir.blocks[0].successors, vec![BlockId(2), BlockId(1)]);
         // Successors are wired symmetrically.
         assert!(lir.blocks[3].predecessors.contains(&BlockId(1)));
         assert!(lir.blocks[3].predecessors.contains(&BlockId(2)));

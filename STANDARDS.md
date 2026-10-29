@@ -108,3 +108,22 @@ For every component delivered by a build agent, the reviewer records:
 ## 7. CI Gates
 
 Enforced by .github/workflows/ci.yml: warnings-as-errors build, workspace tests, rustdoc with -D warnings, CEP lint over crates/tools/tests, end-to-end compile-and-run via the driver, and a reproducible-build cmp check. A merge is accepted only when all gates pass or the failing gate has an open ticket with STATUS stub recorded here.
+
+---
+
+## 8. Convention Pins from Integration (session of 2026-10-30)
+
+Pinned by implementation, enforced by tests:
+
+1. **Parameter threading (spec 1.2/2.2/6.1).** `HirFunction::params: Vec<VarId>` (order = ABI argument position); `hir_to_son` binds each to `Opcode::Parameter(i)`; `son_to_hetir` maps to `ComputeOp::Param`; the MCF allocator pins never-defined-but-used values to `abi::ARG_REGISTERS` in order and return values to RAX.
+2. **Phi lowering (spec 6.2/6.3).** LIR 4.3.1 relaxation is normative: header/join phis lower to `mov` copies placed at the END of each predecessor block (edge copies), one definition per incoming path; the allocator treats [first definition, last use] as one live range with interior rewrites. Copy sets that interleave (swap shapes) sequence through one scratch value, ready-order, deterministic.
+3. **Data-DAG exception (spec 3.3).** Data edges form a DAG except through `Compute(Phi)` nodes, which are cycle-closure points for loop-carried values (mirrors the SoN dominance exception 2.3.1). A data cycle containing no phi still rejects.
+4. **Branch successors (spec 5.3).** LIR/MIR block successors for a conditional branch are `[taken, fallthrough]` and the fallthrough must be the layout-next block; when the true arm is layout-next the branch condition is inverted (Ne swapped for Eq), preserving semantics.
+5. **Structural blocks.** The flattener assigns one block id per HIR region; `hetir_to_lir` compacts to blocks reachable from entry (deterministic renumber) so every emitted block is reachable and terminated.
+
+Open tickets recorded under section 7 rules:
+- **RV8-133** cache.rs: BLAKE3 core to replace the SHA-256 interim (STATUS partial).
+- **RV8-134** query.rs: full demand-driven memoized query system (STATUS partial).
+- **RV8-135** rv8_ir: Display for IR error types (driver formats via Debug meanwhile).
+- **RV8-137** backend: MCF interference miss between two multi-def (phi) values; the loop end-to-end test `pipeline_runs_loop_program` is `#[ignore]`d on this ticket; fix must extend the brute-force optimality corpus with multi-def instances.
+- **RV8-140** backend: MCF linear-scan warm start and incremental/region re-solve (STANDARDS 5.1 acceptance sentence already met).

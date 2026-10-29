@@ -260,6 +260,7 @@ pub enum HirError {
     LoopLatchNotChild { region: RegionId, latch: RegionId },
     CondMissing { region: RegionId },
     OutOfScopeVariable { var: VarId, used_in: RegionId },
+    InvalidParam { var: VarId },
     InvalidBreakTarget { stmt: StmtId, target: RegionId },
     InvalidContinueTarget { stmt: StmtId, target: RegionId },
     ExprCycle { expr: ExprId },
@@ -283,9 +284,10 @@ fn check_budget(items: u32) -> Result<(), HirError> {
 }
 
 /// CEP:WHAT: The HIR for one function: flat region/statement/expression/variable vectors
-///   plus the root region.
+///   plus the ordered parameter list and the root region.
 /// CEP:WHY: Central Level-0 container consumed by structural passes and by flattening
-///   (spec 6.1).
+///   (spec 6.1); `params` carries the ABI-visible argument order so flattening can emit
+///   Opcode::Parameter entry nodes in declaration order.
 /// CEP:STATUS: complete
 /// CEP:FAILURE: see HirError.
 /// CEP:ASSUMES: one function per container; root names a valid region without parent.
@@ -298,6 +300,15 @@ pub struct HirFunction {
     pub stmts: Vec<HirStmt>,
     pub exprs: Vec<HirExpr>,
     pub vars: Vec<HirVar>,
+    /// CEP:WHAT: Ordered parameter variables, index = ABI argument position.
+    /// CEP:WHY: Flattening binds each to an Opcode::Parameter entry node; downstream
+    ///   ABI pre-coloring maps the index to the argument register.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: verify rejects dangling, duplicate, or non-root param vars.
+    /// CEP:ASSUMES: each id names a var declared in the root region.
+    /// CEP:COST: POD vector.
+    /// CEP:EVIDENCE: unit tests rv8_ir::lowering::tests::flatten_binds_parameters.
+    pub params: Vec<VarId>,
     pub root: Option<RegionId>,
 }
 
@@ -316,8 +327,37 @@ impl HirFunction {
             stmts: Vec::new(),
             exprs: Vec::new(),
             vars: Vec::new(),
+            params: Vec::new(),
             root: None,
         }
+    }
+
+    /// CEP:WHAT: Declares the ordered parameter variables of the function.
+    /// CEP:WHY: Single construction path for the ABI argument order; fails closed on
+    ///   dangling, duplicate, or non-root variables instead of trusting the caller.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: InvalidParam when a var id is dangling, duplicated, or declared
+    ///   outside the root region.
+    /// CEP:ASSUMES: the root region exists (set before calling).
+    /// CEP:COST: O(params).
+    /// CEP:EVIDENCE: unit tests rv8_ir::lowering::tests::flatten_binds_parameters and
+    ///   hir_rejects_bad_params.
+    pub fn set_params(&mut self, params: Vec<VarId>) -> Result<(), HirError> {
+        let root = self.root.ok_or(HirError::DanglingRegion(RegionId(u32::MAX)))?;
+        for (i, &var) in params.iter().enumerate() {
+            let v = self
+                .vars
+                .get(var.0 as usize)
+                .ok_or(HirError::InvalidParam { var })?;
+            if v.declared_in != root {
+                return Err(HirError::InvalidParam { var });
+            }
+            if params[..i].contains(&var) {
+                return Err(HirError::InvalidParam { var });
+            }
+        }
+        self.params = params;
+        Ok(())
     }
 
     /// CEP:WHAT: Appends a region with a parent and returns its id.
@@ -437,6 +477,19 @@ impl HirFunction {
         };
         check_budget(total)?;
         let root = self.root.ok_or(HirError::DanglingRegion(RegionId(u32::MAX)))?;
+
+        // Parameter contract: every param var exists, is unique in the list, and is
+        // declared in the root region (mirrors set_params; verify is authoritative for
+        // functions assembled without the setter).
+        for (i, &var) in self.params.iter().enumerate() {
+            let v = self
+                .vars
+                .get(var.0 as usize)
+                .ok_or(HirError::InvalidParam { var })?;
+            if v.declared_in != root || self.params[..i].contains(&var) {
+                return Err(HirError::InvalidParam { var });
+            }
+        }
 
         // 1.3.1 acyclic and properly nested: parent/child links are mutually consistent and
         // every parent chain terminates at the root without revisiting a region.
