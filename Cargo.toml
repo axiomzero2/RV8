@@ -1,0 +1,52 @@
+# CEP:FILE: Cargo.toml
+# CEP:WHAT: Workspace manifest for the RV8 Rust compiler, autotuner, runtime, and enforcement tooling.
+# CEP:WHY: A single workspace pins one version, one profile, and zero external dependencies across all crates, making deterministic builds auditable from the manifest alone.
+# CEP:CLASS: HPC-1
+# CEP:STATUS: complete
+# CEP:FAILURE: Cargo exits with a manifest error if a member crate is missing or a dependency graph cycle is introduced.
+# CEP:ASSUMES: workspace members listed below exist; enforced by every cargo invocation.
+# CEP:COST: cold; parsed once per build.
+# CEP:EVIDENCE: cargo metadata resolves the full member graph in CI.
+# CEP:SECURITY: no network dependencies; every crate is first-party under crates/.
+[workspace]
+resolver = "2"
+members = [
+    "crates/rv8_core",
+    "crates/rv8_ir",
+    "crates/rv8_frontend",
+    "crates/rv8_middle",
+    "crates/rv8_backend",
+    "crates/rv8_autotuner",
+    "crates/rv8_object",
+    "crates/rv8_runtime",
+    "crates/rv8_driver",
+    "tools/cep_lint",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/axiomzero2/RV8"
+
+[workspace.dependencies]
+rv8_core = { path = "crates/rv8_core" }
+rv8_ir = { path = "crates/rv8_ir" }
+rv8_frontend = { path = "crates/rv8_frontend" }
+rv8_middle = { path = "crates/rv8_middle" }
+rv8_backend = { path = "crates/rv8_backend" }
+rv8_autotuner = { path = "crates/rv8_autotuner" }
+rv8_object = { path = "crates/rv8_object" }
+rv8_runtime = { path = "crates/rv8_runtime" }
+
+# CEP:WHAT: Release profile tuned for deterministic, audit-friendly machine code.
+# CEP:WHY: One codegen unit and LTO remove link-order and inlining nondeterminism between builds on the same toolchain.
+# CEP:STATUS: complete
+# CEP:FAILURE: none
+# CEP:ASSUMES: same rustc version reproduces same artifacts; verified by CI rebuild check.
+# CEP:COST: cold; build-time only.
+# CEP:EVIDENCE: CI runs release build twice and compares artifact hashes.
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

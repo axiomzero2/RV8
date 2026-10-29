@@ -1,0 +1,89 @@
+{
+  "standard": {
+    "name": "CEP&CC",
+    "version": "0.1",
+    "source": "standard.md"
+  },
+  "fail_on": [0, 1],
+  "exit_codes": { "clean": 0, "findings": 1, "bootstrap": 2, "usage": 3 },
+  "file_globs": ["crates/**/*.rs", "tools/**/*.rs", "tests/**/*.rs"],
+  "rules": {
+    "CEP-LINT-FILE-HEADER": {
+      "severity": 1,
+      "check": "comment_block_schema",
+      "mode": "file_header",
+      "required_fields": ["CEP:FILE", "CEP:WHAT", "CEP:WHY", "CEP:CLASS", "CEP:STATUS", "CEP:FAILURE", "CEP:ASSUMES", "CEP:COST", "CEP:EVIDENCE"],
+      "class_field": "CEP:CLASS",
+      "allowed_classes": ["CEP-0", "CEP-1", "CEP-2", "CC", "FFI", "HPC-0", "HPC-1", "HPC-2", "RCS-0", "RCS-1", "RCS-2"],
+      "max_start_line": 1
+    },
+    "CEP-LINT-FUNC-BLOCK": {
+      "severity": 1,
+      "check": "function_policy",
+      "mode": "block",
+      "required_fields": ["CEP:WHAT", "CEP:WHY", "CEP:STATUS", "CEP:FAILURE", "CEP:ASSUMES", "CEP:COST", "CEP:EVIDENCE"],
+      "min_body_statements": 2
+    },
+    "CEP-LINT-STATUS-VALUE": {
+      "severity": 2,
+      "check": "comment_block_schema",
+      "mode": "status_value",
+      "status_field": "CEP:STATUS",
+      "allowed_values": ["complete", "partial", "stub", "placeholder"]
+    },
+    "CEP-LINT-TODO-OWNER": {
+      "severity": 1,
+      "check": "comment_regex",
+      "pattern": "\\b(TODO|FIXME|XXX|HACK)\\b",
+      "icase": true,
+      "suppression_pattern": "CEP:TODO\\([^)]+\\):\\s*CEP-\\d+"
+    },
+    "CEP-LINT-STUB-DECL": {
+      "severity": 1,
+      "check": "comment_block_schema",
+      "mode": "stub_requirements",
+      "status_field": "CEP:STATUS",
+      "statuses": ["stub", "partial", "placeholder"],
+      "required_fields": ["CEP:OWNER", "CEP:TICKET"]
+    },
+    "CEP-LINT-PLACEHOLDER-COMMENT": {
+      "severity": 1,
+      "check": "comment_regex",
+      "pattern": "\\b(not implemented|unimplemented|placeholder|fixme|tbd|wip)\\b",
+      "icase": true,
+      "suppression_pattern": "^\\s*//\\s*CEP:"
+    },
+    "CEP-LINT-PLACEHOLDER-TEXT": {
+      "severity": 1,
+      "check": "string_literal_regex",
+      "pattern": "\\b(not implemented|unimplemented|placeholder|tbd)\\b",
+      "icase": true
+    },
+    "CEP-LINT-MAGIC-NUMBER": {
+      "severity": 2,
+      "check": "numeric_literal_policy",
+      "allowed_values": [0, 1],
+      "exempt_contexts": ["const", "static", "enum", "assert", "test", "derive", "cfg"]
+    },
+    "CEP-LINT-HOT-BANNED": {
+      "severity": 0,
+      "check": "banned_token_policy",
+      "applies_to_classes": ["CEP-0", "HPC-0", "RCS-0"],
+      "class_field": "CEP:CLASS",
+      "tokens": [".unwrap()", ".expect(", "panic!(", "todo!(", "unimplemented!", "Box::new", "Vec::new", "String::new", "format!(", "println!(", "eprintln!", "std::time::Instant", "dyn ", "Rc::new", "Arc::new", "Mutex::new", "RwLock::new", ".clone()", "thread::spawn"]
+    },
+    "CEP-LINT-STUB-BODY": {
+      "severity": 1,
+      "check": "function_policy",
+      "mode": "stub_body",
+      "suppress_statuses": ["stub", "partial", "placeholder"]
+    },
+    "CEP-LINT-EMPTY-CATCH": { "severity": 1, "check": "flat_code_regex", "pattern": "catch\\s*\\([^)]*\\)\\s*\\{\\s*\\}" },
+    "CEP-LINT-EMPTY-BRANCH": { "severity": 2, "check": "flat_code_regex", "pattern": "\\b(if|else|for|while|match)[^{]*\\{\\s*\\}" },
+    "CEP-LINT-CONSTANT-RETURN": { "severity": 2, "check": "function_policy", "mode": "constant_return", "pattern": "^return (true|false|nullptr);$" },
+    "CEP-LINT-NAMING-TYPE": { "severity": 2, "check": "flat_code_regex", "pattern": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)", "name_pattern": "^[A-Z][A-Za-z0-9]*$" },
+    "CEP-LINT-NAMING-FUNC": { "severity": 2, "check": "function_policy", "mode": "naming", "name_pattern": "^[a-z][a-z0-9_]*$" },
+    "CEP-LINT-COMMENTED-CODE": { "severity": 2, "check": "comment_regex", "pattern": "^\\s*//\\s*(let |fn |if |for |while |return |pub )", "suppression_pattern": "CEP:" },
+    "CEP-LINT-DOC-SYNC": { "severity": 1, "check": "doc_rule_coverage", "doc_path": "standard.md", "heading_pattern": "^### Rule (CEP-LINT-[A-Z-]+)$", "version_pattern": "CEP&CC 0\\.1" }
+  }
+}

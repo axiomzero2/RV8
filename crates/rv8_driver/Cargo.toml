@@ -1,0 +1,30 @@
+# CEP:FILE: crates/rv8_driver/Cargo.toml
+# CEP:WHAT: Manifest placeholder for rv8_driver; finalized by its owning implementation task.
+# CEP:WHY: Workspace members must exist before implementation lands.
+# CEP:CLASS: HPC-1
+# CEP:STATUS: stub
+# CEP:OWNER: axiomzero2
+# CEP:TICKET: RV8-100
+# CEP:FAILURE: none
+# CEP:ASSUMES: none
+# CEP:COST: cold.
+# CEP:EVIDENCE: workspace build.
+[package]
+name = "rv8_driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rv8_core = { workspace = true }
+rv8_ir = { workspace = true }
+rv8_frontend = { workspace = true }
+rv8_middle = { workspace = true }
+rv8_backend = { workspace = true }
+rv8_autotuner = { workspace = true }
+rv8_object = { workspace = true }
+
+[[bin]]
+name = "rv8c"
+path = "src/main.rs"

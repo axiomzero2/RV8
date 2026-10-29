@@ -1,0 +1,19 @@
+# CEP:FILE: tools/cep_lint/Cargo.toml
+# CEP:WHAT: Manifest placeholder for the cep_lint enforcement tool.
+# CEP:WHY: Standard section 50 requires a config-driven linter in the repository.
+# CEP:CLASS: CEP-2
+# CEP:STATUS: stub
+# CEP:OWNER: axiomzero2
+# CEP:TICKET: RV8-100
+# CEP:FAILURE: none
+# CEP:ASSUMES: none
+# CEP:COST: cold.
+# CEP:EVIDENCE: workspace build.
+[package]
+name = "cep_lint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

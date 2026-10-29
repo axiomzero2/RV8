@@ -1,0 +1,17 @@
+# CEP:FILE: crates/rv8_core/Cargo.toml
+# CEP:WHAT: Manifest for rv8_core, the shared foundation of RV8 (spans, interning, diagnostics, arenas, hashing, deterministic RNG).
+# CEP:WHY: Every other crate depends on these primitives; a single dependency-free implementation keeps cost and determinism auditable in one place.
+# CEP:CLASS: HPC-1
+# CEP:STATUS: complete
+# CEP:FAILURE: none
+# CEP:ASSUMES: no external dependencies; enforced by review and cep_lint supply-chain rule.
+# CEP:COST: cold; manifest only.
+# CEP:EVIDENCE: workspace build resolves rv8_core with zero non-workspace dependencies.
+[package]
+name = "rv8_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

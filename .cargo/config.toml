@@ -1,0 +1,14 @@
+# CEP:FILE: .cargo/config.toml
+# CEP:WHAT: Cargo build configuration redirecting artifacts away from the standard target directory.
+# CEP:WHY: Standard section 32.5 reserves target/ for target-specific first-party source; build artifacts live in build/ so the directory tree states intent without ambiguity.
+# CEP:CLASS: CEP-1
+# CEP:STATUS: complete
+# CEP:FAILURE: none
+# CEP:ASSUMES: none
+# CEP:COST: cold; build-time only.
+# CEP:EVIDENCE: cargo build writes to build/ in CI.
+[build]
+target-dir = "build"
+
+[term]
+color = "auto"

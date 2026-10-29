@@ -1,0 +1,6 @@
+# CEP:FILE: .gitignore
+# CEP:WHAT: Excludes build artifacts from version control.
+# CEP:WHY: .cargo/config.toml redirects cargo target output to build/; committing it would bloat the repository with non-source state.
+# CEP:CLASS: CEP-2
+# CEP:STATUS: complete
+/build/

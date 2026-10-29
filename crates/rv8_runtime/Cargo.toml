@@ -1,0 +1,23 @@
+# CEP:FILE: crates/rv8_runtime/Cargo.toml
+# CEP:WHAT: Manifest for rv8_runtime, the zero-dependency runtime linked into compiled programs.
+# CEP:WHY: Generated code must run without libc or std; this crate is no_std at its root.
+# CEP:CLASS: HPC-1
+# CEP:STATUS: stub
+# CEP:OWNER: axiomzero2
+# CEP:TICKET: RV8-100
+# CEP:FAILURE: none
+# CEP:ASSUMES: std feature enabled only for tests.
+# CEP:COST: cold.
+# CEP:EVIDENCE: workspace build.
+[package]
+name = "rv8_runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+std = []
+
+[dependencies]

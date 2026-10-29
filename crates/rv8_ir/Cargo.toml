@@ -1,0 +1,19 @@
+# CEP:FILE: crates/rv8_ir/Cargo.toml
+# CEP:WHAT: Manifest for rv8_ir, the shared intermediate representation contract of RV8.
+# CEP:WHY: Middle-end, backend, and autotuner must share one printable, hashable, verifiable IR
+#   (standard 38.17); a dedicated crate prevents dependency cycles between those components.
+# CEP:CLASS: HPC-0
+# CEP:STATUS: complete
+# CEP:FAILURE: none
+# CEP:ASSUMES: depends only on rv8_core; enforced by review.
+# CEP:COST: cold; manifest only.
+# CEP:EVIDENCE: workspace build.
+[package]
+name = "rv8_ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rv8_core = { workspace = true }

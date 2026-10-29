@@ -1,0 +1,22 @@
+# CEP:FILE: crates/rv8_autotuner/Cargo.toml
+# CEP:WHAT: Manifest placeholder for rv8_autotuner; finalized by its owning implementation task.
+# CEP:WHY: Workspace members must exist before implementation lands.
+# CEP:CLASS: HPC-1
+# CEP:STATUS: stub
+# CEP:OWNER: axiomzero2
+# CEP:TICKET: RV8-100
+# CEP:FAILURE: none
+# CEP:ASSUMES: none
+# CEP:COST: cold.
+# CEP:EVIDENCE: workspace build.
+[package]
+name = "rv8_autotuner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rv8_core = { workspace = true }
+rv8_ir = { workspace = true }
+rv8_middle = { workspace = true }
