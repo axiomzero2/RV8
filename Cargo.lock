@@ -21,6 +21,7 @@ version = "0.1.0"
 dependencies = [
  "rv8_core",
  "rv8_ir",
+ "rv8_isl",
  "rv8_middle",
 ]
 
@@ -55,6 +56,10 @@ version = "0.1.0"
 dependencies = [
  "rv8_core",
 ]
+
+[[package]]
+name = "rv8_isl"
+version = "0.1.0"
 
 [[package]]
 name = "rv8_middle"

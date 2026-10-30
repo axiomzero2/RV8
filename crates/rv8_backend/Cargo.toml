@@ -17,6 +17,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+rv8_isl = { path = "../rv8_isl" }
 rv8_core = { workspace = true }
 rv8_ir = { workspace = true }
 rv8_middle = { workspace = true }

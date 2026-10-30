@@ -1,0 +1,18 @@
+# CEP:FILE: crates/rv8_isl/Cargo.toml
+# CEP:WHAT: Manifest for the ISL target-description crate.
+# CEP:WHY: One crate owns the target-description grammar, model, and validation so
+#   the backend and tooling share one definition of a target.
+# CEP:CLASS: CEP-1
+# CEP:STATUS: complete
+# CEP:FAILURE: none
+# CEP:ASSUMES: none
+# CEP:COST: cold.
+# CEP:EVIDENCE: workspace build.
+[package]
+name = "rv8_isl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

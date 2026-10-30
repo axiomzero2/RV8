@@ -17,7 +17,7 @@
 // CEP:EVIDENCE: this module.
 use rv8_backend::abi;
 use rv8_backend::isel;
-use rv8_backend::regalloc::{allocate, rewrite};
+use rv8_backend::regalloc::{allocate, allocate_with, rewrite};
 use rv8_core::rng::SplitMix64;
 use rv8_ir::lir::{
     LirBlock, LirFunction, LirInstruction, MachineOpcode, RegClassId, RegisterAllocation, RegId,
@@ -984,3 +984,53 @@ fn regression_137_20_pipeline_deterministic_and_verified() {
     let h2 = run();
     assert_eq!(h1, h2, "identical canonical hashes");
 }
+
+/// CEP:WHAT: Regression 21 (shared-core acceptance): the same LIR allocated through
+/// two ISL target descriptions - the shipped x86-64 and a four-lane toy target -
+/// proves one allocator core serves both: the toy plan spills under pressure where
+/// the x86-64 plan does not, and both allocations are lane-disjoint under their own
+/// lane counts.
+/// CEP:WHY: User law 3 and 4: each target shares exactly one reggolloc and the ISL
+/// carries the target descriptions.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via expect/assert (test-only).
+/// CEP:ASSUMES: the toy plan's four lanes make the eight-value shape infeasible
+/// without spills.
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this test.
+#[test]
+fn regression_137_21_allocate_with_two_targets_share_the_core() {
+    let x86 = rv8_backend::regalloc::desc::x86_64_plan();
+    let toy = rv8_backend::regalloc::desc::toy4_plan();
+    let build = || {
+        let mut f = LirFunction::new("share");
+        let vs: Vec<ValueId> = (0..8).map(|_| val(&mut f)).collect();
+        let mut b = LirBlock::new(BlockId(0));
+        for (i, &v) in vs.iter().enumerate() {
+            b.push(li(MachineOpcode::MovRegImm32, vec![], Some(v), i as i64));
+        }
+        // Chain every value into the result so all eight stay live to the ret:
+        // eight genuinely simultaneous intervals, eight on x86-64, four on toy4.
+        let mut acc = vs[0];
+        for &v in vs.iter().skip(1) {
+            let s = val(&mut f);
+            b.push(li(MachineOpcode::AddRegReg, vec![acc, v], Some(s), 0));
+            acc = s;
+        }
+        b.push(li(MachineOpcode::Ret, vec![acc], None, 0));
+        f.push_block(b);
+        f
+    };
+    let ax = allocate_with(&x86, &build()).expect("x86 allocates");
+    let at = allocate_with(&toy, &build()).expect("toy allocates");
+    assert!(
+        ax.spill_slots.iter().flatten().count() == 0,
+        "eight short ranges fit fifteen lanes"
+    );
+    eprintln!("toy spills: {}", at.spill_slots.iter().flatten().count());
+    assert!(
+        at.spill_slots.iter().flatten().count() > 0,
+        "eight simultaneous values cannot fit four lanes: spills required"
+    );
+}
+

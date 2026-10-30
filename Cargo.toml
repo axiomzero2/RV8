@@ -16,6 +16,7 @@ members = [
     "crates/rv8_frontend",
     "crates/rv8_middle",
     "crates/rv8_backend",
+    "crates/rv8_isl",
     "crates/rv8_autotuner",
     "crates/rv8_object",
     "crates/rv8_runtime",
@@ -35,6 +36,7 @@ rv8_ir = { path = "crates/rv8_ir" }
 rv8_frontend = { path = "crates/rv8_frontend" }
 rv8_middle = { path = "crates/rv8_middle" }
 rv8_backend = { path = "crates/rv8_backend" }
+rv8_isl = { path = "crates/rv8_isl" }
 rv8_autotuner = { path = "crates/rv8_autotuner" }
 rv8_object = { path = "crates/rv8_object" }
 rv8_runtime = { path = "crates/rv8_runtime" }

@@ -1,0 +1,65 @@
+# CEP:FILE: .github/workflows/ci.yml
+# CEP:WHAT: The normative CI gate set from STANDARDS section 7: warnings-as-errors
+#   build, workspace tests, rustdoc with -D warnings, the CEP lint over
+#   crates/tools/tests, the end-to-end compile-and-run through the driver, and the
+#   reproducible-build comparison (release artifact built twice, byte-compared).
+# CEP:WHY: A merge is accepted only when every gate passes (STANDARDS 7); encoding the
+#   gates here makes them mechanical instead of aspirational.
+# CEP:CLASS: CEP-2
+# CEP:STATUS: complete
+# CEP:FAILURE: the workflow fails on the first red gate; GitHub reports the failing
+#   step. No gate is permitted to stay red without an open ticket under STANDARDS 7.
+# CEP:ASSUMES: ubuntu-latest with a stable Rust toolchain; no third-party crates, so
+#   no registry access is required beyond toolchain download.
+# CEP:COST: cold; one workspace build per gate reuses the shared cargo cache.
+# CEP:EVIDENCE: every green run of this workflow is the evidence trail.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy
+
+      - name: Build (warnings are errors)
+        run: cargo build --workspace --locked
+
+      - name: Workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rustdoc (warnings are errors)
+        run: cargo doc --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: CEP lint (severity 0 and 1 fail)
+        run: cargo run -q -p cep_lint -- crates tools tests
+
+      - name: End-to-end compile and run via the driver
+        run: |
+          cargo build -q -p rv8_driver
+          ./build/debug/rv8c tests/fixtures/add_main.rs --emit run --expect 13
+
+      - name: Reproducible build (release twice, compare bytes)
+        run: |
+          cargo build -q --release -p rv8_driver
+          cp build/release/rv8c /tmp/rv8c_run_one
+          cargo clean -q -p rv8_driver
+          cargo build -q --release -p rv8_driver
+          cmp /tmp/rv8c_run_one build/release/rv8c

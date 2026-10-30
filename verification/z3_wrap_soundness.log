@@ -1,0 +1,3 @@
+P1 ok: conservative rule (shipped) proves no clobber for the loop family
+P2 ok: naive linear rule admits a clobber witness (the pre-fix defect)
+z3 5.3.3 - wrap soundness verified
