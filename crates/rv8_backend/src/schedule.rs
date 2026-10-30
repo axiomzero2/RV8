@@ -148,6 +148,7 @@ fn defs_uses(instr: &MachineInstr) -> (Vec<u32>, Vec<u32>, bool, bool) {
         }
         MachineOpcode::XorRegSelf => (vec![regs[0]], vec![], false, false),
         MachineOpcode::MovRegMem | MachineOpcode::LoadStack => (vec![regs[0]], mregs, true, false),
+        MachineOpcode::StoreStackImm => (vec![], mregs, false, true),
         MachineOpcode::MovMemReg | MachineOpcode::StoreStack => {
             // The stored VALUE register is a use (RAW source); memory base/index
             // registers are uses too.

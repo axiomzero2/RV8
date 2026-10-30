@@ -311,11 +311,17 @@ pub fn select_with_model(
     let n_values = lir.values.len();
 
     // Function-global use counts and definition flags, recomputed from the instruction
-    // stream (never trusted from LirValue.uses).
+    // stream (never trusted from LirValue.uses). Also the global linearized
+    // first-definition point per value (parameters count as defined at entry, point
+    // 0): a use is legal when SOME definition precedes it in the global order, which
+    // is what makes a multi-def (phi) value legally readable before its same-block
+    // redefinition - the read consumes the incoming value.
     let mut global_use = vec![0u32; n_values];
     let mut defined = vec![false; n_values];
+    let mut first_def = vec![0u32; n_values];
+    let mut scan_point = 1u32;
     for block in &lir.blocks {
-        for instr in &block.instructions {
+        for (pos, instr) in block.instructions.iter().enumerate() {
             for &op in &instr.operands {
                 let v = op.0 as usize;
                 if v >= n_values {
@@ -334,8 +340,14 @@ pub fn select_with_model(
                 // phi values lower to predecessor-edge copies, one definition per
                 // incoming path. Selection is per-def-site, so redefinition is legal.
                 defined[v] = true;
+                // First definition in scan order = the global linearized minimum;
+                // point 0 never occurs (points start at 1), so 0 marks "no def yet".
+                if first_def[v] == 0 {
+                    first_def[v] = scan_point + pos as u32;
+                }
             }
         }
+        scan_point += block.instructions.len() as u32;
     }
 
     // Parameters: never-defined values in value-id order (documented convention).
@@ -356,9 +368,11 @@ pub fn select_with_model(
     }
 
     let mut mir = MachineIrFunction::new(&lir.name, Isa::X86_64);
+    let mut base = 1u32;
     for block in &lir.blocks {
-        let machine = select_block(lir, block, &global_use, model)?;
+        let machine = select_block(lir, block, &global_use, &first_def, base, model)?;
         mir.push_block(machine);
+        base += block.instructions.len() as u32;
     }
     Ok(mir)
 }
@@ -398,6 +412,8 @@ fn select_block(
     lir: &LirFunction,
     block: &LirBlock,
     global_use: &[u32],
+    first_def: &[u32],
+    base: u32,
     model: &dyn TargetCostModel,
 ) -> Result<MachineBlock, BackendError> {
     if block.instructions.is_empty() {
@@ -414,15 +430,19 @@ fn select_block(
     // ---- DP pass: bottom-up in instruction (definition) order. ----
     for (pos_u, instr) in block.instructions.iter().enumerate() {
         let pos = pos_u as u32;
-        // Validate operands: in range (global pass), defined strictly before use in
-        // this block (dominance; rejects use-before-def and self-reference).
+        // Validate operands against the GLOBAL linearized first definition: a use is
+        // legal when some definition precedes it strictly (parameters count as
+        // defined at entry, point 0). This accepts multi-def (phi) values read
+        // before their same-block redefinition - the read consumes the incoming
+        // value - while still rejecting genuine use-before-def and self-reference.
+        // The previous block-local check rejected the legal phi shape (the
+        // RV8-137 part-8 fallout: the correctly sequenced swap copies were refused).
         for &op in &instr.operands {
-            if let Some(d) = ctx.def_pos[op.0 as usize] {
-                if d >= pos {
-                    return Err(BackendError::IllegalLir { detail: format!(
-                        "block {}: value {} used at instruction {} but defined at {} (use before def or self-reference)",
-                        block.id.0, op.0, pos, d) });
-                }
+            let v = op.0 as usize;
+            if first_def[v] >= base + pos {
+                return Err(BackendError::IllegalLir { detail: format!(
+                    "block {}: value {} used at global point {} but first defined at {} (use before def or self-reference)",
+                    block.id.0, op.0, base + pos, first_def[v]) });
             }
         }
         // Only the last instruction may transfer control (LIR 4.3.3).
@@ -434,6 +454,28 @@ fn select_block(
             return Err(BackendError::IllegalLir { detail: format!(
                 "block {}: control transfer at instruction {} is not the block terminator",
                 block.id.0, pos) });
+        }
+
+        // Calls never enter the DP: they lower through emit_side_instruction with
+        // ABI argument moves, the relocation target, and (when a result is present)
+        // the RAX result move emitted there. The result-value class check mirrors the
+        // parameter rule: only GPR-class results are modeled (XMM0 returns are not).
+        if matches!(instr.opcode, MachineOpcode::Call) {
+            if let Some(v) = instr.result {
+                if lir.values[v.0 as usize].reg_class != RegClassId::Gpr {
+                    return Err(BackendError::UnsupportedPattern { detail: format!(
+                        "call result {} has non-GPR class; floating-point returns are not implemented",
+                        v.0) });
+                }
+            }
+            continue;
+        }
+        if matches!(instr.opcode, MachineOpcode::Syscall) {
+            if instr.result.is_some() {
+                return Err(BackendError::UnsupportedPattern {
+                    detail: "syscall results are not modeled".into() });
+            }
+            continue;
         }
 
         if instr.opcode == MachineOpcode::MovMemReg {
@@ -488,6 +530,13 @@ fn select_block(
     // ---- Emission pass: LIR order; folded definitions are skipped. ----
     let mut out: Vec<MachineInstr> = Vec::with_capacity(block.instructions.len());
     for (pos_u, instr) in block.instructions.iter().enumerate() {
+        // Calls (result-bearing or not) lower through emit_side_instruction: the DP
+        // never selects call shapes, and the result is consumed there by the RAX
+        // result move, not by a cell.
+        if matches!(instr.opcode, MachineOpcode::Call | MachineOpcode::Syscall) {
+            emit_side_instruction(&mut out, instr, &store_fold[pos_u])?;
+            continue;
+        }
         if let Some(r) = instr.result {
             if consumed[r.0 as usize] {
                 continue; // folded into a later instruction's addressing
@@ -623,6 +672,19 @@ fn emit_side_instruction(
                 .collect();
             operands.push(MachineOperand::Imm(instr.immediate));
             out.push(MachineInstr { opcode: MachineOpcode::Call, operands, predicates: Vec::new() });
+            // ABI result move: the callee leaves the return value in RAX, so route it
+            // into the call's virtual register immediately after the call. Allocation
+            // treats the value as defined at this LIR point and the call barrier keeps
+            // it out of caller-saved lanes, so the move is the only RAX reader. The
+            // scheduler models the call's caller-saved clobbers, giving this move its
+            // RAW edge (it can never float above the call).
+            if let Some(v) = instr.result {
+                out.push(MachineInstr {
+                    opcode: MachineOpcode::MovRegReg,
+                    operands: vec![vreg(v), Reg(abi::RETURN_REGISTER)],
+                    predicates: Vec::new(),
+                });
+            }
         }
         MachineOpcode::Ret => {
             if instr.result.is_some() {

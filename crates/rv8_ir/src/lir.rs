@@ -107,6 +107,19 @@ pub enum MachineOpcode {
     Syscall,
     LoadStack,
     StoreStack,
+    /// CEP:WHAT: Store a sign-extended 32-bit immediate to a stack slot
+    ///   (`mov qword [mem], imm32`; operands [Mem, Imm]).
+    /// CEP:WHY: Spilling the definition of an immediate needs no scratch register:
+    ///   at peak pressure every register holds a live value, so routing the
+    ///   immediate through a register would clobber one; the direct store keeps
+    ///   spill rewriting sound and feasible (RV8-137 follow-up: the 16-value
+    ///   pressure clique exhausted the scratch pool at the spilled definition).
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: machir verification rejects non-Mem/Imm operand shapes.
+    /// CEP:ASSUMES: the immediate fits i32 (the MovRegImm32 contract).
+    /// CEP:COST: POD.
+    /// CEP:EVIDENCE: spill_path_end_to_end; the RV8-137 regression batches.
+    StoreStackImm,
     MovRegMem,
     MovMemReg,
     Fence,

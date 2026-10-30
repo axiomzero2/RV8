@@ -127,15 +127,19 @@ fn regression_ret_03_bare_ret() {
 
 }
 
-/// CEP:WHAT: Regression 04_tail_call_bare.
-/// CEP:WHY: A tail call's result lives in RAX by convention and has no virtual register.
+/// CEP:WHAT: Regression 04_tail_call_value.
+/// CEP:WHY: A non-Unit call DEFINES its result as a virtual register, so a tail call
+///   threads its result through the Ret operand like any other value; isel emits the
+///   RAX move from that operand. (The old test pinned the weaker bare-Ret convention,
+///   which passed only because the call result happened to sit in RAX - exactly the
+///   accident the RV8-137 follow-up removed by giving calls produced values.)
 /// CEP:STATUS: complete
 /// CEP:FAILURE: panics via expect/assert (test-only).
 /// CEP:ASSUMES: none
 /// CEP:COST: test-only.
-/// CEP:EVIDENCE: this test.
+/// CEP:EVIDENCE: this test plus call_inside_loop_accumulates (driver suite).
 #[test]
-fn regression_ret_04_tail_call_bare() {
+fn regression_ret_04_tail_call_value() {
     let mut son = SeaOfNodes::new();
     let c = add(&mut son, Opcode::Const(1), IrType::I32, vec![], 0);
     let call = add(&mut son, Opcode::Call { callee: 0 }, IrType::I32, vec![c], 0);
@@ -143,7 +147,15 @@ fn regression_ret_04_tail_call_bare() {
     add(&mut son, Opcode::Return, IrType::Unit, vec![call, r], 0);
     let lir = to_lir(&son);
     let rs = rets(&lir);
-    assert_eq!(rs[0].operands.len(), 0, "tail call keeps the RAX convention, bare ret");
+    assert_eq!(rs[0].operands.len(), 1, "the call result rides the Ret operand");
+    // The operand is defined by the Call instruction itself.
+    let operand = rs[0].operands[0];
+    let defined_by_call = lir.blocks.iter().any(|b| {
+        b.instructions
+            .iter()
+            .any(|i| matches!(i.opcode, rv8_ir::lir::MachineOpcode::Call) && i.result == Some(operand))
+    });
+    assert!(defined_by_call, "the Ret operand is the call result value");
 
 }
 
@@ -236,11 +248,13 @@ fn regression_ret_08_compute_after_call() {
     let s = add(&mut son, Opcode::Add, IrType::I32, vec![call, one], 0);
     let r = add(&mut son, Opcode::Region, IrType::Unit, vec![], 0);
     add(&mut son, Opcode::Return, IrType::Unit, vec![s, r], 0);
-    // Known limitation (documented, fail-closed): a call result has no virtual
-    // register, so consuming it in a live compute is rejected, never miscompiled.
+    // Calls now produce their result value, so consuming it in a live compute is
+    // fully supported (the old fail-closed rejection was the documented limitation
+    // this removes); the add must lower cleanly and the Ret must carry its result.
     let het = son_to_hetir(&son).expect("linearize");
-    let err = hetir_to_lir(&het, "f").expect_err("call-result use is rejected");
-    assert!(format!("{err:?}").contains("missing value"), "{err:?}");
+    let lir = hetir_to_lir(&het, "f").expect("call-result compute lowers");
+    let rs = rets(&lir);
+    assert_eq!(rs[0].operands.len(), 1, "the computed call result is returned");
 
 }
 

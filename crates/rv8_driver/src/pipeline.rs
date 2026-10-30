@@ -187,7 +187,18 @@ pub fn run(session: &Session, program: &CompiledProgram) -> Result<i32, DriverEr
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join("rv8c_run_bin");
+        // Unique path per invocation: concurrent driver runs (parallel test
+        // threads inside one process, concurrent processes) must never share one
+        // executable file. Process id separates processes; the atomic counter
+        // separates threads. The fixed name made parallel end-to-end tests flake
+        // on write/exec races (RV8-137 follow-up).
+        static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "rv8c_run_bin_{}_{}",
+            std::process::id(),
+            seq
+        ));
         std::fs::write(&path, &image)
             .map_err(|e| DriverError::Io(format!("write exec: {e}")))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))

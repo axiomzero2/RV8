@@ -301,13 +301,42 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
             }
         }
     }
+    // Reverse-post-order layout of the reachable blocks (deterministic DFS,
+    // successors in ascending order). Old-id order is NOT a valid execution order
+    // for nested control flow: synthesized join blocks can carry ids below the
+    // region blocks that must precede them (the if-inside-while shape placed the
+    // merge with its phi copies before the arms defining those values, tripping the
+    // linearized use-before-def contract, and the branch fallthrough convention
+    // broke). Reverse post-order places every non-back-edge successor after its
+    // predecessor, so back edges are the only backward transfers.
+    let mut post: Vec<usize> = Vec::new();
+    let mut state: Vec<u8> = vec![0; block_count]; // 0 unseen, 1 on stack, 2 done
+    let mut dfs: Vec<(usize, usize)> = Vec::new();
+    if reach[0] {
+        state[0] = 1;
+        dfs.push((0, 0));
+    }
+    while let Some(frame) = dfs.last_mut() {
+        if frame.1 < succ[frame.0].len() {
+            let t = succ[frame.0][frame.1].0 as usize;
+            frame.1 += 1;
+            if reach[t] && state[t] == 0 {
+                state[t] = 1;
+                dfs.push((t, 0));
+            }
+        } else {
+            let b = frame.0;
+            state[b] = 2;
+            post.push(b);
+            dfs.pop();
+        }
+    }
+    let rpo: Vec<usize> = post.into_iter().rev().collect();
     let mut remap: Vec<Option<BlockId>> = vec![None; block_count];
     let mut next_id = 0u32;
-    for (i, &r) in reach.iter().enumerate() {
-        if r {
-            remap[i] = Some(BlockId(next_id));
-            next_id += 1;
-        }
+    for &b in &rpo {
+        remap[b] = Some(BlockId(next_id));
+        next_id += 1;
     }
     let block_count = next_id as usize;
     for list in &mut succ {
@@ -331,12 +360,21 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
     let mut func = LirFunction::new(name);
     let mut value_of: Vec<Option<ValueId>> = vec![None; het.nodes.len()];
     for (i, node) in het.nodes.iter().enumerate() {
+        // Calls with a non-Unit result produce that value: the ABI return in RAX
+        // becomes a virtual register defined by the call (isel emits the RAX result
+        // move; regalloc keeps the value out of caller-saved lanes across the call
+        // barrier). Unit-typed calls - including Drop, which maps to Call with imm
+        // -1 - produce nothing. Without this, any consumer of a call result fails
+        // with a lowering error, and the returned-value fix above silently falls
+        // back to RAX residue for tail calls (the RV8-137 follow-up defect: the
+        // call-inside-loop program failed with a missing-value error).
         let produces = matches!(
             node.kind,
             HetKind::Compute(_)
                 | HetKind::Memory(MemoryOp::Load)
                 | HetKind::Communication(CommOp::Transfer)
-        );
+        ) || (matches!(node.kind, HetKind::Control(ControlOp::Call))
+            && !matches!(node.ty, IrType::Unit));
         if produces {
             let class = if node.ty.is_float() {
                 RegClassId::Fpr
@@ -351,6 +389,43 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
     let mut blocks: Vec<Vec<LirInstruction>> = vec![Vec::new(); block_count];
     let mut branch_succ: BTreeMap<usize, (BlockId, BlockId)> = BTreeMap::new();
     let mut zero: Option<ValueId> = None;
+    // Branch arm table (new block id -> (true-arm block, false-arm block)) derived
+    // from each Branch node's control out-edges ordered by target NODE id: the
+    // flattener creates the TRUE-arm region node first, so node order names the arms
+    // independently of block numbering or layout.
+    let mut branch_arms: BTreeMap<usize, (BlockId, BlockId)> = BTreeMap::new();
+    for (i, node) in het.nodes.iter().enumerate() {
+        if !matches!(node.kind, HetKind::Control(ControlOp::Branch)) {
+            continue;
+        }
+        let bb = match node.block {
+            Some(x) => x,
+            None => continue,
+        };
+        let mut arms: Vec<(usize, BlockId)> = het
+            .edges
+            .iter()
+            .filter(|e| e.from.0 as usize == i && matches!(e.kind, HetEdgeKind::Control))
+            .filter_map(|e| {
+                het.node(e.to)
+                    .ok()
+                    .and_then(|t| t.block.map(|b| (e.to.0 as usize, b)))
+            })
+            .collect();
+        arms.sort_by_key(|(nid, _)| *nid);
+        if arms.len() == 2 {
+            if let (Some(t), Some(f)) = (
+                remap[arms[0].1.0 as usize],
+                remap[arms[1].1.0 as usize],
+            ) {
+                let new_bb = match remap[bb.0 as usize] {
+                    Some(nb) => nb.0 as usize,
+                    None => continue,
+                };
+                branch_arms.insert(new_bb, (t, f));
+            }
+        }
+    }
     for (i, node) in het.nodes.iter().enumerate() {
         let b = match node.block {
             // Nodes of dropped (unreachable) blocks vanish with the block.
@@ -509,20 +584,31 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
                 // layout-next block, so when the true arm is layout-next the branch
                 // condition is inverted (jump-if-false targets the false arm) and the
                 // true arm falls through; semantics are identical.
+                // Branch arm semantics come from the Branch node's control
+                // out-edges ordered by target NODE id (the flattener creates the
+                // TRUE-arm node first), NOT from block-id order: the
+                // reverse-post-order layout renumbers blocks, so reading arms from
+                // block numbering silently swaps them whenever the false arm lands
+                // on the lower layout id (the RV8-137 follow-up defect: the loop
+                // exited immediately). Machine verification still requires the
+                // fallthrough arm to be the layout-next block, so when the true arm
+                // is layout-next the branch condition is inverted.
+                let (true_arm, false_arm) = *branch_arms
+                    .get(&b)
+                    .ok_or(LowerError::UnsupportedOp {
+                        op: "branch without two arm blocks",
+                    })?;
                 let layout_next = BlockId((b + 1) as u32);
-                let (kind, target) = match succ[b].as_slice() {
-                    [t, f] if *f == layout_next => (SetKind::Ne, *t),
-                    [t, f] if *t == layout_next => (SetKind::Eq, *f),
-                    [t, _] => (SetKind::Ne, *t),
-                    _ => {
-                        return Err(LowerError::UnsupportedOp {
-                            op: "branch without two successors",
-                        })
-                    }
+                let (kind, target) = if false_arm == layout_next {
+                    (SetKind::Ne, true_arm)
+                } else if true_arm == layout_next {
+                    (SetKind::Eq, false_arm)
+                } else {
+                    (SetKind::Ne, true_arm)
                 };
                 // Encoder convention: block successors are [taken, fallthrough] with
                 // the fallthrough equal to the layout-next block (spec 5.3 invariant 3).
-                let other = if succ[b][0] == target { succ[b][1] } else { succ[b][0] };
+                let other = if true_arm == target { false_arm } else { true_arm };
                 branch_succ.insert(b, (target, other));
                 blocks[b].push(LirInstruction {
                     opcode: MachineOpcode::CmpRegReg,
@@ -566,7 +652,10 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
                 blocks[b].push(LirInstruction {
                     opcode: MachineOpcode::Call,
                     operands,
-                    result: None,
+                    // The call defines its result value (value_of is Some exactly
+                    // for non-Unit calls; see the produces rule above). isel reads
+                    // this result to emit the RAX result move.
+                    result: value_of[i],
                     immediate: node.imm,
                     target_block: None,
                 });
@@ -676,36 +765,42 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
         for (pbi, copies) in per_pred {
             let mut pending: Vec<(ValueId, ValueId)> =
                 copies.into_iter().filter(|(d, s)| d != s).collect();
-            let mut scratch: Option<ValueId> = None;
-            let mut forced_last: Option<ValueId> = None;
             let mut sequenced: Vec<(ValueId, ValueId)> = Vec::new();
-            while let Some(k) = pending
-                .iter()
-                .position(|(_, s)| !pending.iter().any(|(d, _)| d == s))
-            {
-                let c = pending.remove(k);
-                sequenced.push(c);
-            }
-            while !pending.is_empty() {
-                // Pure cycle: save the first source in a scratch register, redirect,
-                // and deliver the saved value to its destination after everything else.
-                let s = *scratch.get_or_insert_with(|| {
-                    func.add_value(IrType::I64, RegClassId::Gpr)
-                });
-                let (d0, s0) = pending[0];
-                sequenced.push((s, s0));
-                forced_last = Some(d0);
-                pending.remove(0);
+            // One deferred delivery per pure cycle: each broken cycle saves one
+            // source into its OWN scratch value and delivers it after the whole run
+            // (a single shared scratch and single deferred delivery silently
+            // miscompiled copy sets with two independent cycles: the second save
+            // overwrote the first scratch and the second deferred destination
+            // dropped the first delivery, so `while .. { swap(a,b); swap(c,d); }`
+            // lost a pair per iteration).
+            let mut deferred: Vec<(ValueId, ValueId)> = Vec::new();
+            loop {
                 while let Some(k) = pending
                     .iter()
-                    .position(|(_, s)| !pending.iter().any(|(d, _)| d == s))
+                    // Ready when the DESTINATION is not a pending SOURCE: emitting
+                    // a copy whose destination another pending copy still reads
+                    // would destroy that value. (The previous condition - source
+                    // not a pending destination - emitted the destroyer first, so
+                    // the fibonacci rotation `a = b; b = t` lowered to
+                    // `b = t; a = b` and every iteration read the NEW b.)
+                    .position(|(d, _)| !pending.iter().any(|(_, s2)| *s2 == *d))
                 {
                     let c = pending.remove(k);
                     sequenced.push(c);
                 }
+                if pending.is_empty() {
+                    break;
+                }
+                // A pure cycle remains: save its first source into a fresh scratch,
+                // break the cycle, and deliver the saved value after everything else.
+                let sc = func.add_value(IrType::I64, RegClassId::Gpr);
+                let (d0, s0) = pending[0];
+                sequenced.push((sc, s0));
+                deferred.push((d0, sc));
+                pending.remove(0);
             }
-            if let Some(d0) = forced_last {
-                sequenced.push((d0, scratch.expect("scratch set with forced_last")));
+            for (d, sc) in deferred {
+                sequenced.push((d, sc));
             }
             for (d, s) in sequenced {
                 blocks[pbi].push(LirInstruction {

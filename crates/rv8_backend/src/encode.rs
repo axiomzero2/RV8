@@ -456,6 +456,7 @@ fn opcode_name(opcode: MachineOpcode) -> &'static str {
         MachineOpcode::Syscall => "syscall",
         MachineOpcode::LoadStack => "loadstack",
         MachineOpcode::StoreStack => "storestack",
+        MachineOpcode::StoreStackImm => "storestackimm",
         MachineOpcode::MovRegMem => "movrm",
         MachineOpcode::MovMemReg => "movmr",
         MachineOpcode::Fence => "fence",
@@ -616,6 +617,26 @@ fn encode_instr(
             push_rex(out, true, src.0 >= 8, mem.rex_x, mem.rex_b, false);
             out.push(0x89);
             mem.append_to(r3(src), out);
+            Ok(None)
+        }
+        MachineOpcode::StoreStackImm => {
+            // `mov qword [mem], imm32`: REX.W + C7 /0 + ModRM(0) + imm32. The
+            // immediate is sign-extended to 64 bits, which is exactly the
+            // MovRegImm32 spill contract; no register is touched, so peak-pressure
+            // definitions spill without a scratch.
+            check_arity(instr, 2)?;
+            let mem = encode_mem(&mem_at(instr, 0, "destination")?)?;
+            let imm = imm_at(
+                instr,
+                1,
+                i32::MIN as i64,
+                i32::MAX as i64,
+            )?;
+            let imm32 = imm as i32;
+            push_rex(out, true, false, mem.rex_x, mem.rex_b, false);
+            out.push(0xC7);
+            mem.append_to(0, out);
+            out.extend_from_slice(&imm32.to_le_bytes());
             Ok(None)
         }
         MachineOpcode::Setcc(kind) => {
@@ -791,6 +812,11 @@ fn validate_instr(instr: &MachineInstr, is_last: bool) -> Result<(), BackendErro
             check_arity(instr, 2)?;
             encode_mem(&mem_at(instr, 0, "destination")?)?;
             reg_at(instr, 1, "source")?;
+        }
+        MachineOpcode::StoreStackImm => {
+            check_arity(instr, 2)?;
+            encode_mem(&mem_at(instr, 0, "destination")?)?;
+            imm_at(instr, 1, i32::MIN as i64, i32::MAX as i64)?;
         }
         MachineOpcode::Setcc(_) => {
             check_arity(instr, 1)?;

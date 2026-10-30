@@ -144,7 +144,7 @@ pub mod tests {
             for i in &b.instructions {
                 match i.opcode {
                     MachineOpcode::LoadStack => loads += 1,
-                    MachineOpcode::StoreStack => stores += 1,
+                    MachineOpcode::StoreStack | MachineOpcode::StoreStackImm => stores += 1,
                     _ => {}
                 }
             }

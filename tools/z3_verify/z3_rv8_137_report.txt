@@ -1,0 +1,4 @@
+[z3] lane_model_soundness: PROVED (refutation unsat)
+[z3] sequencer_correctness: PROVED (7382 copy-set instances checked)
+[z3] hopfreedom_interference: PROVED (refutation unsat)
+[z3] overall: ALL PROVED

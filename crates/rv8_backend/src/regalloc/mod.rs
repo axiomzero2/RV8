@@ -21,6 +21,11 @@ pub mod network;
 pub mod ranges;
 pub mod rewrite;
 pub mod solve;
+// The inline test module was orphaned (never declared), so its 426 lines of
+// brute-force and spill-path evidence never executed; wiring it back in is part
+// of the RV8-137 follow-up review.
+#[cfg(test)]
+mod tests;
 
 use crate::error::BackendError;
 use rv8_ir::lir::{LirFunction, RegClassId, RegisterAllocation};

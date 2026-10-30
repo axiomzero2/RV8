@@ -16,6 +16,8 @@
 //   test and the RV8-137 regression batch.
 use crate::abi::{self, FrameCalculator, FrameLayout};
 use crate::error::BackendError;
+use super::desc;
+use super::ranges::build_ranges;
 use rv8_ir::lir::{LirFunction, MachineOpcode, RegClassId, RegisterAllocation, ValueId};
 use rv8_ir::machir::{
     MachineBlock, MachineInstr, MachineIrFunction, MachineOperand, MemOperand, PhysReg,
@@ -92,6 +94,40 @@ pub fn rewrite(
             BackendError::Internal { detail: format!("spilled value {} has no slot", v.0) }
         })
     };
+
+    // Scratch-avoidance facts (wrap-sound live ranges; see ranges::build_ranges): a
+    // spill scratch PERMANENTLY overwrites its register, so it must avoid (1)
+    // registers read by later MIR instructions in the same block (exact
+    // within-block order) and (2) registers of lanes crossing the block end
+    // (live-out into a later block, or wrapping the back edge - the wrap-sound
+    // ranges make wrap reads visible; MIR order alone cannot see them). The old
+    // rule (avoid only the current instruction's registers) let a scratch destroy
+    // values read later in the same run of phi edge copies or on the next
+    // iteration (the RV8-137 follow-up defect: the call-in-loop program hung
+    // because the spilled accumulator copy used RAX as a scratch, destroying the
+    // i+1 value before its own copy read it).
+    let (ranges, _pts) = build_ranges(&desc::x86_64_plan(), lir)?;
+    let mut block_last: Vec<u32> = Vec::with_capacity(lir.blocks.len());
+    {
+        let mut ord = 0u32;
+        for b in &lir.blocks {
+            ord += b.instructions.len() as u32;
+            block_last.push(ord);
+        }
+    }
+    let mut crossing: Vec<Vec<PhysReg>> = vec![Vec::new(); lir.blocks.len()];
+    for r in &ranges {
+        if lir.values[r.value.0 as usize].reg_class != RegClassId::Gpr {
+            continue; // GPR scratches never collide with FPR lanes
+        }
+        let Some(rid) = alloc.register(r.value) else { continue };
+        let Some(p) = abi::gpr_phys(rid) else { continue };
+        for bi in 0..lir.blocks.len() {
+            if r.def <= block_last[bi] && r.last_use >= block_last[bi] && !crossing[bi].contains(&p) {
+                crossing[bi].push(p);
+            }
+        }
+    }
 
     // Frame facts: saved set + leafness.
     let mut saved: Vec<PhysReg> = Vec::new();
@@ -182,7 +218,54 @@ pub fn rewrite(
                 });
             }
         }
-        for instr in &block.instructions {
+        // Per-instruction avoidance: exact backward liveness over this block's MIR
+        // (register granularity), initialized with the block-end live set (crossing
+        // lanes) and updated per instruction: live_in = (live_out - dest) U sources.
+        // A spill scratch permanently writes its register, so it must avoid exactly
+        // the live-out set of its position.
+        let mut live: Vec<PhysReg> = crossing[bi].clone();
+        let mut avoid_at: Vec<Vec<PhysReg>> = vec![Vec::new(); block.instructions.len()];
+        for (ri, instr) in block.instructions.iter().enumerate().rev() {
+            avoid_at[ri] = live.clone();
+            let db = dest_bearing(instr.opcode);
+            // Kill the destination first: its old content is dead before this
+            // instruction unless the same instruction also reads it (re-added below).
+            if db {
+                if let Some(Reg(r)) = instr.operands.first() {
+                    let phys = if r.0 >= crate::isel::VREG_BASE {
+                        phys_of(ValueId((r.0 - crate::isel::VREG_BASE) as u32))?
+                    } else {
+                        Some(*r)
+                    };
+                    if let Some(p) = phys {
+                        live.retain(|&q| q != p);
+                    }
+                }
+            }
+            for (oi, op) in instr.operands.iter().enumerate() {
+                if db && oi == 0 {
+                    continue; // destination operand: killed above
+                }
+                let regs: Vec<PhysReg> = match op {
+                    Reg(r) => vec![*r],
+                    MachineOperand::Mem(m) => [m.base, m.index].into_iter().flatten().collect(),
+                    MachineOperand::Imm(_) => Vec::new(),
+                };
+                for r in regs {
+                    let phys = if r.0 >= crate::isel::VREG_BASE {
+                        phys_of(ValueId((r.0 - crate::isel::VREG_BASE) as u32))?
+                    } else {
+                        Some(r)
+                    };
+                    if let Some(p) = phys {
+                        if !live.contains(&p) {
+                            live.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        for (ri, instr) in block.instructions.iter().enumerate() {
             // Epilogue before every return: restore RSP, then pop in reverse push order.
             if instr.opcode == MachineOpcode::Ret && !layout.uses_red_zone {
                 if layout.stack_adjust > 0 {
@@ -200,7 +283,15 @@ pub fn rewrite(
                     });
                 }
             }
-            rewrite_instr(instr, dest_bearing(instr.opcode), &phys_of, &slot_of, &mem_slot, &mut out)?;
+            rewrite_instr(
+                instr,
+                dest_bearing(instr.opcode),
+                &phys_of,
+                &slot_of,
+                &mem_slot,
+                &avoid_at[ri],
+                &mut out,
+            )?;
         }
         new_blocks.push(MachineBlock {
             instructions: out,
@@ -240,6 +331,7 @@ fn rewrite_instr(
     phys_of: &dyn Fn(ValueId) -> Result<Option<PhysReg>, BackendError>,
     slot_of: &dyn Fn(ValueId) -> Result<u32, BackendError>,
     mem_slot: &dyn Fn(u32) -> MemOperand,
+    lane_avoid: &[PhysReg],
     out: &mut Vec<MachineInstr>,
 ) -> Result<(), BackendError> {
     let is_vreg = |r: PhysReg| -> Option<ValueId> {
@@ -258,7 +350,13 @@ fn rewrite_instr(
     let mut new_ops = instr.operands.clone();
     let mut used: Vec<PhysReg> = Vec::new();
     // Occupancy for scratch choice: every physical register the instruction touches,
-    // explicitly or through a memory operand's base/index.
+    // explicitly or through a memory operand's base/index, PLUS every register a
+    // live lane occupies after this instruction (the scratch write is permanent).
+    for &p in lane_avoid {
+        if !used.contains(&p) {
+            used.push(p);
+        }
+    }
     for op in &instr.operands {
         match op {
             Reg(r) => {
@@ -349,8 +447,17 @@ fn rewrite_instr(
             new_ops[i] = MachineOperand::Mem(nm);
         }
     }
-    // Spilled destination: def into a scratch, store after.
+    // Spilled destination: def into a scratch, store after. Two refinements keep
+    // this sound and feasible: (a) a MovRegImm32 definition stores its immediate
+    // DIRECTLY into the slot (StoreStackImm) - at peak pressure every register
+    // holds a live value, so routing the immediate through a scratch would
+    // clobber one; (b) otherwise the destination scratch may reuse ANY register
+    // not live after this instruction - including registers the instruction
+    // itself reads and the source scratch - because x86 reads all operands before
+    // writing the destination: `lea sc, [base + sc]` folds the reload into the
+    // defining instruction. Only live-out registers (lane_avoid) are off limits.
     let mut store_after: Option<MachineInstr> = None;
+    let mut replace_store_imm: Option<(MemOperand, i64)> = None;
     if has_dest {
         if let Reg(r) = instr.operands[0] {
             if let Some(v) = is_vreg(r) {
@@ -358,17 +465,47 @@ fn rewrite_instr(
                     Some(p) => new_ops[0] = Reg(p),
                     None => {
                         let slot = slot_of(v)?;
-                        let scratch = pick_scratch(&mut used)?;
-                        new_ops[0] = Reg(scratch);
-                        store_after = Some(MachineInstr {
-                            opcode: MachineOpcode::StoreStack,
-                            operands: vec![MachineOperand::Mem(mem_slot(slot)), Reg(scratch)],
-                            predicates: Vec::new(),
-                        });
+                        let imm64 = match instr.operands.get(1) {
+                            Some(MachineOperand::Imm(v)) => Some(*v),
+                            _ => None,
+                        };
+                        if instr.opcode == MachineOpcode::MovRegImm32
+                            && imm64.is_some_and(|v| i32::try_from(v).is_ok())
+                        {
+                            replace_store_imm = Some((mem_slot(slot), imm64.unwrap_or(0)));
+                        } else {
+                            let mut dest_used: Vec<PhysReg> = Vec::new();
+                            for &p in lane_avoid {
+                                if !dest_used.contains(&p) {
+                                    dest_used.push(p);
+                                }
+                            }
+                            let scratch = pick_scratch(&mut dest_used)?;
+                            new_ops[0] = Reg(scratch);
+                            store_after = Some(MachineInstr {
+                                opcode: MachineOpcode::StoreStack,
+                                operands: vec![
+                                    MachineOperand::Mem(mem_slot(slot)),
+                                    Reg(scratch),
+                                ],
+                                predicates: Vec::new(),
+                            });
+                        }
                     }
                 }
             }
         }
+    }
+    if let Some((mem, imm)) = replace_store_imm {
+        out.push(MachineInstr {
+            opcode: MachineOpcode::StoreStackImm,
+            operands: vec![MachineOperand::Mem(mem), MachineOperand::Imm(imm)],
+            predicates: instr.predicates.clone(),
+        });
+        if let Some(st) = store_after {
+            out.push(st);
+        }
+        return Ok(());
     }
     out.push(MachineInstr {
         opcode: instr.opcode,

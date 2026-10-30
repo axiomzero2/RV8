@@ -10,12 +10,10 @@
 // CEP:ASSUMES: corpus instances have no calls and no ABI pins unless stated.
 // CEP:COST: test-only.
 // CEP:EVIDENCE: this module.
-use super::*;
 use crate::abi;
-use rv8_ir::lir::{LirBlock, LirInstruction};
-use rv8_ir::son::{BlockId, IrType};
-use rv8_core::rng::SplitMix64;
+use rv8_ir::lir::{MachineOpcode, ValueId};
 use rv8_ir::machir::MachineOperand;
+use MachineOperand::Reg;
 
 
     use super::*;
@@ -417,10 +415,16 @@ use rv8_ir::machir::MachineOperand;
                         assert!(matches!(i.operands[0], MachineOperand::Mem(_)));
                         assert!(matches!(i.operands[1], Reg(_)));
                     }
+                    // Immediate definitions spill with a direct store (no register).
+                    MachineOpcode::StoreStackImm => {
+                        stores += 1;
+                        assert!(matches!(i.operands[0], MachineOperand::Mem(_)));
+                        assert!(matches!(i.operands[1], MachineOperand::Imm(_)));
+                    }
                     _ => {}
                 }
             }
         }
         assert!(loads > 0 && stores > 0, "both spill directions must appear");
     }
-}
+

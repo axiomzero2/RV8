@@ -688,6 +688,7 @@ fn opcode_name(opcode: MachineOpcode) -> &'static str {
         MachineOpcode::Syscall => "syscall",
         MachineOpcode::LoadStack => "loadstack",
         MachineOpcode::StoreStack => "storestack",
+        MachineOpcode::StoreStackImm => "storestackimm",
         MachineOpcode::MovRegMem => "movrm",
         MachineOpcode::MovMemReg => "movmr",
         MachineOpcode::Fence => "fence",
