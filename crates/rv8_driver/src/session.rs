@@ -78,7 +78,7 @@ impl Default for Session {
 /// CEP:STATUS: complete
 /// CEP:FAILURE: DriverError::Usage for unknown flags, missing values, bad numbers, or a
 ///   second positional argument.
-/// CEP:ASSUMES: args excludes argv[0].
+/// CEP:ASSUMES: `args` excludes `argv[0]`.
 /// CEP:COST: O(argc).
 /// CEP:EVIDENCE: unit tests rv8_driver::session::tests::*.
 pub fn parse_args(args: &[String]) -> Result<Session, crate::error::DriverError> {

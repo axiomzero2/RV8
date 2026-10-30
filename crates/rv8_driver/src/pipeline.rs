@@ -41,7 +41,7 @@ fn ir_msg(e: rv8_ir::LowerError) -> String {
 /// CEP:COST: owns the object bytes.
 /// CEP:EVIDENCE: tests in this module.
 pub struct CompiledProgram {
-    /// One object containing one .text.fn<i> section per function.
+    /// One object containing one `.text.fn<i>` section per function.
     pub object: ObjectFile,
     /// Real name of the entry function when one is named main.
     pub entry_symbol: Option<String>,
@@ -251,19 +251,16 @@ pub mod tests {
     /// CEP:WHAT: Runs a loop program (sum 1..=5) through the whole pipeline.
     /// CEP:WHY: Exercises loop lowering, phi placement, branch resolution, and register
     ///   pressure beyond the straight-line fixture.
-    /// CEP:STATUS: stub
-    /// CEP:OWNER: axiomzero2
-    /// CEP:TICKET: RV8-137
-    /// CEP:FAILURE: ignored until RV8-137 lands: the MCF allocator misses an
-    ///   interference between two multi-def (phi) values, so the loop computes a wrong
-    ///   sum. The lowering chain itself is verified end to end by this test; extend the
-    ///   brute-force optimality corpus with multi-def instances when fixing.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: panics via expect/assert (test-only).
     /// CEP:ASSUMES: unix exec available.
     /// CEP:COST: test-only.
-    /// CEP:EVIDENCE: this test.
+    /// CEP:EVIDENCE: this test. RV8-137 fixed: lane-private MCF job pairs, wrap-sound
+    ///   intervals from CFG liveness, threaded return values, and the expression
+    ///   flattener operand order (see the RV8-137 regression batch in
+    ///   rv8_backend::regalloc::tests and rv8_ir::lowering::tests).
     #[test]
     #[cfg(unix)]
-    #[ignore = "RV8-137: MCF interference miss on multi-def (phi) values"]
     fn pipeline_runs_loop_program() {
         let src = "fn main() -> i32 { let mut i = 1; let mut acc = 0; \
                    while i < 6 { acc = acc + i; i = i + 1; } acc }";

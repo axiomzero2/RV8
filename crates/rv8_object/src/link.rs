@@ -200,7 +200,7 @@ pub(crate) fn resolve_globals(objs: &[ObjectFile]) -> Result<BTreeMap<String, De
 /// CEP:EVIDENCE: all link tests go through this type.
 struct Linker<'a> {
     objs: &'a [ObjectFile],
-    /// flat = base[obj] + section; base has objs.len() + 1 entries.
+    /// `flat = base[obj] + section`; `base` has `objs.len() + 1` entries.
     base: Vec<usize>,
     total_sections: usize,
     globals: BTreeMap<String, Def>,

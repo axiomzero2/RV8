@@ -389,13 +389,21 @@ impl<'a> Flattener<'a> {
                             work.push(EFrame::Descend(*a));
                         }
                         ExprKind::Binary(_, a, b) => {
+                            // The work stack is LIFO and Combine consumes the value
+                            // stack in push order, so the RIGHT operand must be pushed
+                            // first: the left operand then evaluates first and lands at
+                            // the bottom of the arity window. Pushing a before b delivered
+                            // operands [rhs, lhs] - every non-commutative binary operator
+                            // (sub, div, comparisons, shifts) evaluated backwards.
                             work.push(EFrame::Combine(e, 2));
-                            work.push(EFrame::Descend(*a));
                             work.push(EFrame::Descend(*b));
+                            work.push(EFrame::Descend(*a));
                         }
                         ExprKind::Call { args, .. } => {
+                            // Same LIFO rule as Binary: reverse the argument pushes so
+                            // Combine consumes them in declaration order.
                             work.push(EFrame::Combine(e, args.len()));
-                            for &arg in args {
+                            for &arg in args.iter().rev() {
                                 work.push(EFrame::Descend(arg));
                             }
                         }

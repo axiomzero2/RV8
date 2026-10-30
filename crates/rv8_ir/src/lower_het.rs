@@ -540,9 +540,21 @@ pub fn hetir_to_lir(het: &HetIr, name: &str) -> Result<LirFunction, LowerError> 
                 });
             }
             HetKind::Control(ControlOp::Return) => {
+                // The return value, when present and value-bearing, is the Ret operand;
+                // isel emits the ABI move into RAX and the allocator pins the value for
+                // its whole range (regalloc contract). A value-less input (a tail Call,
+                // whose result lives in RAX by the call convention and has no virtual
+                // register) or no input lowers to a bare Ret.
+                let operands: Vec<ValueId> = match inputs.first() {
+                    Some(&src) => match value_of.get(src).copied().flatten() {
+                        Some(v) => vec![v],
+                        None => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
                 blocks[b].push(LirInstruction {
                     opcode: MachineOpcode::Ret,
-                    operands: Vec::new(),
+                    operands,
                     result: None,
                     immediate: 0,
                     target_block: None,

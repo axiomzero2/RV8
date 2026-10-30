@@ -1,14 +1,18 @@
 // CEP:FILE: crates/rv8_backend/src/regalloc.rs
 // CEP:WHAT: Min-cost multi-commodity-flow register allocation per STANDARDS 5.1: per
 //   register class, a machine-timeline flow network (one cap-1 timeline chain per
-//   register, job pairs per live range with priced through-edges; see solve_class) in
-//   which every integral flow of value R is a feasible assignment by construction;
-//   R successive-shortest-path augmentations (one per register timeline) with Johnson
-//   potentials initialized by one Bellman-Ford pass and updated by
-//   pot[v] += min(dist[v], dist[snk]); a Bellman-Ford negative-cycle cleanse as the
-//   optimality backstop; call/divide barriers and ABI pre-coloring as omitted job arcs.
-//   Also the spill/prologue/epilogue rewriter producing verified Machine IR plus a
-//   FramePlan.
+//   register, LANE-PRIVATE job pairs per (live range, register) with priced
+//   through-edges; see solve_class) in which every integral flow of value R is a
+//   feasible assignment by construction - a unit of flow enters and exits a chord on
+//   the same register's chain; R successive-shortest-path augmentations (one per
+//   register timeline) with Johnson potentials initialized by one Bellman-Ford pass
+//   and updated by `pot[v] += min(dist[v], dist[snk])`; a Bellman-Ford negative-cycle
+//   cleanse as the optimality backstop; call/divide barriers and ABI pre-coloring as
+//   omitted job arcs; the live ranges come from build_ranges whose conservative
+//   wrap-sound rule (CFG back-edge liveness plus multi-def values) protects registers
+//   across loop back-edges; repair_assignment then restores assignment semantics on
+//   the solved flow (surplus-take cancellation plus idle-lane fill). Also the
+//   spill/prologue/epilogue rewriter producing verified Machine IR plus a FramePlan.
 // CEP:WHY: Register pressure is an optimization problem, not a heuristic; the network
 //   makes "which values spill" the exact optimum of an explicit cost function, and the
 //   brute-force corpus proves optimality on small instances.
@@ -36,7 +40,9 @@
 // CEP:EVIDENCE: mcf_matches_bruteforce_optimum_corpus (24 seeded instances),
 //   mcf_allocation_is_deterministic, mcf_spills_under_pressure_and_verifies,
 //   spill_path_inserts_loads_and_stores, mcf_respects_abi_precoloring,
-//   mcf_avoids_caller_saved_across_calls.
+//   mcf_avoids_caller_saved_across_calls, and the RV8-137 batch (twenty tests plus the
+//   multi-def optimality corpus and the lane-lock feasibility corpus) in
+//   crates/rv8_backend/tests/rv8_137_regression.rs.
 // CEP:SECURITY: every traversal is iterative (worklists, heaps, BF sweeps); no recursion
 //   over user structure; all iteration orders are index-ordered (38.10).
 
@@ -186,7 +192,8 @@ pub struct FramePlan {
 /// blocks in layout order with point 0 = function entry.
 /// CEP:STATUS: complete
 /// CEP:FAILURE: none
-/// CEP:ASSUMES: def <= last_use (checked in build_ranges).
+/// CEP:ASSUMES: def <= last_use (checked in build_ranges); for multi-def (phi) values
+/// last_use is the final program point (the conservative wrap-sound interval).
 /// CEP:COST: POD.
 /// CEP:EVIDENCE: internal.
 #[derive(Clone, Copy, Debug)]
@@ -198,15 +205,32 @@ struct LiveRange {
     pin: Option<PhysReg>,
 }
 
+/// CEP:WHAT: Maximum backward-liveness fixpoint rounds per function.
+/// CEP:WHY: Named budget (38.12); the dataflow converges in O(block depth) rounds.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: BudgetExceeded.
+/// CEP:ASSUMES: none
+/// CEP:COST: compile-time constant.
+/// CEP:EVIDENCE: enforced in build_ranges.
+pub const MAX_LIVENESS_ROUNDS: usize = 10_000;
+
 /// CEP:WHAT: Computes the linearized program points and live ranges for a function.
 /// CEP:WHY: The network is built over these points; shared facts for allocate/rewrite.
 /// CEP:STATUS: complete
-/// CEP:FAILURE: IllegalLir for double definitions, dangling ids, and uses that precede
-/// their definition in layout order (the linearized-liveness contract).
+/// CEP:FAILURE: IllegalLir for double definitions of single-def values, dangling ids,
+/// and uses that precede their definition in layout order (the linearized-liveness
+/// contract).
 /// CEP:ASSUMES: point 0 is function entry; the instruction at global ordinal g is
-/// point g+1.
+/// point g+1. Multi-def values (phi edge copies, LIR 4.3.1) take the conservative
+/// wrap-sound interval [first_def, last_point]: each interior def-write happens at a
+/// point the lane must stay reserved for, and the value is live across the back-edge
+/// to uses that sit EARLIER in layout order (loop headers), which no half-open
+/// linear interval ending at a use can express. Single-def values never wrap: the
+/// linearized-liveness contract rejects use-before-def, so [def, last_use] covers
+/// their whole live set.
 /// CEP:COST: O(instructions + values).
-/// CEP:EVIDENCE: internal; behavior pinned by all regalloc tests.
+/// CEP:EVIDENCE: internal; behavior pinned by all regalloc tests, including the
+/// RV8-137 regression batch and the multi-def optimality corpus.
 fn build_ranges(lir: &LirFunction) -> Result<(Vec<LiveRange>, u32), BackendError> {
     let n = lir.values.len();
     let mut total_instrs: u32 = 0;
@@ -216,6 +240,7 @@ fn build_ranges(lir: &LirFunction) -> Result<(Vec<LiveRange>, u32), BackendError
     let points: u32 = 1 + total_instrs;
 
     let mut def_point: Vec<Option<u32>> = vec![None; n];
+    let mut last_def: Vec<u32> = vec![0; n];
     let mut last_use: Vec<u32> = vec![0; n];
     let mut any_use = vec![false; n];
     let mut ordinal: u32 = 0;
@@ -242,17 +267,109 @@ fn build_ranges(lir: &LirFunction) -> Result<(Vec<LiveRange>, u32), BackendError
                 }
                 // LIR 4.3.1 relaxes single-definition ("registers can be redefined"):
                 // phi values lower to predecessor-edge copies, so a value may be
-                // written once per incoming path. The live range spans the FIRST
-                // definition to the last use; interior rewrites are ordinary writes
-                // within the routed register, and every def is a spill store site.
+                // written once per incoming path. The FIRST definition anchors the
+                // range; every def is a spill store site; interior rewrites are
+                // ordinary writes within the routed register.
                 if def_point[v].is_none() {
                     def_point[v] = Some(point);
                 }
+                last_def[v] = point;
             }
         }
     }
 
     // Parameters (never defined, used somewhere) in value-id order pin to ABI arg regs.
+    //
+    // First: CFG liveness (block-level gen/kill, backward fixpoint) to detect values
+    // live across BACK-EDGES. Linear layout order linearizes liveness only for
+    // forward flows: a value that is live-out of a block with a layout-earlier
+    // successor is re-read after the wrap, so no half-open linear interval ending at
+    // its last layout use protects it (a single-def loop constant is re-read at the
+    // header of every iteration after the latch rewrote its register - exactly the
+    // zero-constant clobber on RV8-137). Such values take the conservative wrap-sound
+    // interval [def, last_point]. Multi-def (phi) values always qualify (their uses
+    // sit in the wrap-target block), and the explicit multi_def rule below stays as
+    // defense in depth.
+    let block_index_of_id: Vec<usize> = {
+        let mut m = vec![usize::MAX; lir.blocks.len()];
+        for (bi, b) in lir.blocks.iter().enumerate() {
+            if (b.id.0 as usize) < m.len() {
+                m[b.id.0 as usize] = bi;
+            }
+        }
+        m
+    };
+    let mut gen: Vec<Vec<bool>> = vec![vec![false; n]; lir.blocks.len()];
+    let mut kill: Vec<Vec<bool>> = vec![vec![false; n]; lir.blocks.len()];
+    {
+        for (bi, block) in lir.blocks.iter().enumerate() {
+            for instr in &block.instructions {
+                for &op in &instr.operands {
+                    let v = op.0 as usize;
+                    if !kill[bi][v] {
+                        gen[bi][v] = true;
+                    }
+                }
+                if let Some(r) = instr.result {
+                    kill[bi][r.0 as usize] = true;
+                }
+            }
+        }
+    }
+    let mut live_out: Vec<Vec<bool>> = vec![vec![false; n]; lir.blocks.len()];
+    let mut live_in: Vec<Vec<bool>> = gen.clone();
+    let mut converged = false;
+    for _round in 0..MAX_LIVENESS_ROUNDS {
+        let mut changed = false;
+        for bi in (0..lir.blocks.len()).rev() {
+            // live_out = union of live_in over CFG successors.
+            for &s in &lir.blocks[bi].successors {
+                let si = match block_index_of_id.get(s.0 as usize) {
+                    Some(&i) if i != usize::MAX => i,
+                    _ => continue,
+                };
+                for v in 0..n {
+                    if live_in[si][v] && !live_out[bi][v] {
+                        live_out[bi][v] = true;
+                        changed = true;
+                    }
+                }
+            }
+            // live_in = gen | (live_out & !kill).
+            for v in 0..n {
+                let nv = gen[bi][v] || (live_out[bi][v] && !kill[bi][v]);
+                if nv != live_in[bi][v] {
+                    live_in[bi][v] = nv;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        return Err(BackendError::BudgetExceeded { budget: "MAX_LIVENESS_ROUNDS" });
+    }
+    // A block index whose CFG successor is earlier in layout order carries a back-edge.
+    let mut wraps: Vec<bool> = vec![false; n];
+    for (bi, block) in lir.blocks.iter().enumerate() {
+        for &s in &block.successors {
+            let si = match block_index_of_id.get(s.0 as usize) {
+                Some(&i) if i != usize::MAX => i,
+                _ => continue,
+            };
+            if si <= bi {
+                for v in 0..n {
+                    if live_out[bi][v] {
+                        wraps[v] = true;
+                    }
+                }
+            }
+        }
+    }
+
     let mut param_index = 0usize;
     let mut ranges = Vec::with_capacity(n);
     for v in 0..n {
@@ -288,8 +405,14 @@ fn build_ranges(lir: &LirFunction) -> Result<(Vec<LiveRange>, u32), BackendError
         // keep), and a use at the defining instruction itself is self-use; both get a
         // one-lane span [def, def+1) so the defining write occupies its register for at
         // least the point it is defined at. A genuine use before the definition in
-        // layout order is an error.
-        let range_last = if last_use[v] <= def {
+        // layout order is an error. A multi-def value takes the wrap-sound interval
+        // [first_def, last_point]: its register is reserved from the first edge copy
+        // to the end of the layout so no interior rewrite is clobbered and no single-
+        // def value steals the lane across the loop back-edge (RV8-137).
+        let multi_def = last_def[v] > def;
+        let range_last = if multi_def || wraps[v] {
+            points - 1
+        } else if last_use[v] <= def {
             if any_use[v] && last_use[v] < def {
                 return Err(BackendError::IllegalLir { detail: format!(
                     "value {} used before its definition in layout order; linearized liveness \
@@ -309,13 +432,16 @@ fn build_ranges(lir: &LirFunction) -> Result<(Vec<LiveRange>, u32), BackendError
     }
 
     // Return-value pins: every ret's value operand is pinned to RAX for its whole
-    // range (documented in isel: the ABI move writes RAX).
+    // range (documented in isel: the ABI move writes RAX). A value that already
+    // carries a pin (a parameter pre-colored to its ABI argument register) keeps it:
+    // isel emits the register-to-register ABI move, so overwriting the entry pin
+    // would lose the incoming value entirely.
     for block in &lir.blocks {
         for instr in &block.instructions {
             if instr.opcode == MachineOpcode::Ret {
                 if let Some(&v) = instr.operands.first() {
                     for range in ranges.iter_mut() {
-                        if range.value == v {
+                        if range.value == v && range.pin.is_none() {
                             range.pin = Some(abi::RETURN_REGISTER);
                         }
                     }
@@ -666,7 +792,7 @@ fn cancel_negative_cycles(
 type DijkstraResult = (Vec<Option<i64>>, Vec<Option<usize>>);
 
 /// CEP:WHAT: Dijkstra over residual half-edges with Johnson reduced costs
-/// (c + pot[u] - pot[v]); returns distances and parent links. The heap orders by
+/// (`c + pot[u] - pot[v]`); returns distances and parent links. The heap orders by
 /// (distance, node id), so ties pop the lowest node id first: deterministic.
 /// CEP:WHY: STANDARDS 5.1: successive shortest paths use reduced-cost Dijkstra with
 /// deterministic tie-breaking.
@@ -760,31 +886,42 @@ enum Outcome {
 
 // Design note (the machine-timeline reduction behind solve_class): one timeline chain
 // C(r, 0..points) per register (SRC -> C(r,0), idle arcs C(r,p) -> C(r,p+1),
-// C(r,last) -> SNK, all cap 1 cost 0), and per range i a job pair J_i/J_i' threaded
-// through the chains: entry arc C(r, def_i) -> J_i, priced through-edge J_i -> J_i'
-// (cap 1, cost -SPILL_PRICE(i)), and exit arc J_i' -> C(r, use_i) (cap 1, cost
-// 2*MOVE_COST + callee-saved surcharge). Range i is assigned register r iff its entry
-// arc carries flow; no flow on the through-edge means spilled. A unit of flow is one
-// register's timeline; job arcs are chords a timeline may take, and a single forward
-// path can only take time-disjoint chords, so any integral flow IS a feasible register
-// assignment. Pricing each taken job at (c - SPILL) makes the encoded objective equal
-// the assignment cost plus the constant sum of all spill prices, so the min-cost flow
-// of value R is THE exact optimum of the interval-assignment problem the brute-force
-// checker enumerates.
+// C(r,last) -> SNK, all cap 1 cost 0), and per (range i, register r) a PRIVATE job
+// pair J_in(i,r)/J_out(i,r): entry arc C(r, def_i) -> J_in(i,r), priced through-edge
+// J_in(i,r) -> J_out(i,r) (cap 1, cost -SPILL_PRICE(i)), and exit arc J_out(i,r) ->
+// C(r, use_i) (cap 1, cost 2*MOVE_COST + callee-saved surcharge). The pair is private
+// to its lane: a unit of flow (one register's timeline) that enters a chord on
+// register r's chain exits on register r's chain, so job arcs are lane-locked chords
+// and a single forward path can only take time-disjoint chords of its own register.
+// ANY integral flow of value R therefore IS a feasible register assignment, by
+// construction. (An earlier revision shared one job pair across all lanes; a unit
+// could then enter on register r1 and exit on register r2, teleporting between
+// timelines and double-booking registers while the entry-arc attribution read only
+// the entry side. That was RV8-137; the private pairs remove the defect structurally
+// rather than by repair.) Range i is assigned register r iff the entry arc of its
+// (i, r) pair carries flow; no flowing pair means spilled. Idle timelines may take an
+// already-taken range's chord (the priced through-edge still earns -SPILL_PRICE);
+// attribution keeps the lowest such lane, which only changes which of the equally
+// feasible chords names the register. Pricing each taken job at (c - SPILL) makes the
+// encoded objective equal the assignment cost plus the constant sum of all spill
+// prices, so the min-cost flow of value R is the exact optimum of the
+// interval-assignment problem the brute-force checker enumerates; the corpus test is
+// the standing arbiter of that exactness claim.
 
 /// CEP:WHAT: Solves one register class as a min-cost multi-commodity flow:
-/// 1. Network: machine-timeline reduction (see the design note above); job
-///    arcs crossing a call/divide barrier of register r are omitted, as are arcs of
-///    non-matching registers for pinned ranges.
+/// 1. Network: machine-timeline reduction (see the design note above); the
+///    job pair of (range, register) is omitted entirely when the range crosses a
+///    call/divide barrier of that register, as are pairs of non-matching registers
+///    for pinned ranges.
 /// 2. Potentials: one Bellman-Ford pass (super-source semantics) on the zero flow - the
 ///    negative job-arc prices demand it, and the graph is acyclic so it converges.
 /// 3. Solve: R successive shortest paths (one per register timeline) with Johnson
-///    potentials maintained by pot[v] += min(dist[v], dist[snk]) after each
+///    potentials maintained by `pot[v] += min(dist[v], dist[snk])` after each
 ///    augmentation; the SSP theorem makes the final flow the exact minimum.
 /// 4. Optimality backstop: Bellman-Ford negative-cycle cleanse (a no-op while the SSP
 ///    invariant holds, a repair if it ever regressed).
-/// 5. Attribution: through-edge flow means "in a register", the saturated entry arc
-///    names which one; no flow means spilled.
+/// 5. Attribution: the flowing entry arc of a (range, register) job pair names the
+///    register (lowest lane on the rare multi-take); no flowing pair means spilled.
 ///
 /// CEP:WHY: THE core algorithm (STANDARDS 5.1), exactly as specified.
 /// CEP:STATUS: complete
@@ -792,7 +929,9 @@ enum Outcome {
 /// invariant violations (an R-unit flow always exists: every timeline can idle).
 /// CEP:ASSUMES: ranges have def < last_use; pins reference class registers.
 /// CEP:COST: module CEP:COST.
-/// CEP:EVIDENCE: mcf_matches_bruteforce_optimum_corpus.
+/// CEP:EVIDENCE: mcf_matches_bruteforce_optimum_corpus,
+///   mcf_matches_bruteforce_optimum_multidef_corpus,
+///   mcf_lane_lock_feasibility_corpus.
 #[allow(clippy::too_many_lines)]
 fn solve_class(
     ranges: &[LiveRange],
@@ -804,17 +943,18 @@ fn solve_class(
     let nranges = ranges.len();
     let last_point = points as usize;
     // Node layout: 0 = SRC, 1 = SNK, then per-register timelines
-    // C(r, p) = 2 + r*points + p, then job pairs J_i = jbase + 2i, Jout_i = jbase+2i+1.
+    // C(r, p) = 2 + r*points + p, then per-(range, register) job pairs
+    // J_in(i, r) = jbase + 2*(i*r_count + r), J_out(i, r) = J_in(i, r) + 1.
     let chain = |ridx: usize, p: usize| -> usize { 2 + ridx * last_point + p };
     let jbase = 2 + r_count * last_point;
-    let n_nodes = jbase + 2 * nranges;
+    let n_nodes = jbase + 2 * nranges * r_count;
     if n_nodes > MAX_MCF_NODES {
         return Err(BackendError::BudgetExceeded { budget: "MAX_MCF_NODES" });
     }
     let src = 0usize;
     let snk = 1usize;
-    let job_in = |i: usize| -> usize { jbase + 2 * i };
-    let job_out = |i: usize| -> usize { jbase + 2 * i + 1 };
+    let job_in = |i: usize, r: usize| -> usize { jbase + 2 * (i * r_count + r) };
+    let job_out = |i: usize, r: usize| -> usize { jbase + 2 * (i * r_count + r) + 1 };
 
     let mut g = Graph::new(n_nodes);
     let mut edge_budget = MAX_MCF_EDGES;
@@ -826,30 +966,41 @@ fn solve_class(
         Ok(())
     };
 
-    // Register timelines: one unit of flow per register, idling by default.
+    // Register timelines: one unit of flow per register, idling by default. The
+    // forward half-edge id of every idle arc is recorded so surplus-take repair can
+    // reroute a unit along its own chain (cancel_surplus_takes).
+    let mut chain_arcs: Vec<Vec<usize>> = vec![Vec::new(); r_count];
+    #[allow(clippy::needless_range_loop)] // the lane index addresses three structures
     for ridx in 0..r_count {
         budget_edge()?;
         g.add_edge(src, chain(ridx, 0), 1, 0);
         budget_edge()?;
         g.add_edge(chain(ridx, last_point - 1), snk, 1, 0);
+        let mut arcs = Vec::with_capacity(last_point - 1);
         for p in 0..last_point - 1 {
             budget_edge()?;
-            g.add_edge(chain(ridx, p), chain(ridx, p + 1), 1, 0);
+            let arc = g.add_edge(chain(ridx, p), chain(ridx, p + 1), 1, 0);
+            arcs.push(arc);
         }
+        chain_arcs[ridx] = arcs;
     }
 
-    // Job arcs: entry (timeline -> J), priced through-edge (J -> J'), exit (J' ->
-    // timeline). The through-edge is where the spill offset is charged, so a taken job
-    // costs c_{i,r} - SPILL_PRICE and an untaken job costs SPILL_PRICE in the true
-    // objective (constant P*n offset; see the network CEP block).
+    // Job arcs, per (range, register) PRIVATE pair: entry (this register's timeline
+    // -> J_in), priced through-edge (J_in -> J_out), exit (J_out -> this register's
+    // timeline). The through-edge is where the spill offset is charged, so a taken
+    // job costs c_{i,r} - SPILL_PRICE and an untaken job costs SPILL_PRICE in the
+    // true objective (constant P*n offset; see the design note above). The pair is
+    // lane-locked: entry and exit touch the SAME register's chain, so a unit of flow
+    // can never teleport between register timelines (the RV8-137 defect).
     let mut enters: Vec<Vec<usize>> = Vec::with_capacity(nranges);
-    let mut throughs: Vec<usize> = Vec::with_capacity(nranges);
+    let mut throughs: Vec<Vec<usize>> = Vec::with_capacity(nranges);
+    let mut exits: Vec<Vec<usize>> = Vec::with_capacity(nranges);
     for (i, range) in ranges.iter().enumerate() {
         let pinned_ridx = range.pin.and_then(|p| regs.iter().position(|&x| x == p));
         let spill_price = if pinned_ridx.is_some() { PINNED_SPILL_COST } else { SPILL_COST };
-        budget_edge()?;
-        throughs.push(g.add_edge(job_in(i), job_out(i), 1, -spill_price));
         let mut enter = vec![usize::MAX; r_count];
+        let mut through = vec![usize::MAX; r_count];
+        let mut exit = vec![usize::MAX; r_count];
         for ridx in 0..r_count {
             if let Some(pr) = pinned_ridx {
                 if ridx != pr {
@@ -863,13 +1014,21 @@ fn solve_class(
             if pinned_ridx.is_none() && abi::is_callee_saved(regs[ridx]) {
                 cost += SAVE_RESTORE_COST;
             }
+            let jin = job_in(i, ridx);
+            let jout = job_out(i, ridx);
             budget_edge()?;
-            let ein = g.add_edge(chain(ridx, range.def as usize), job_in(i), 1, 0);
+            let ein = g.add_edge(chain(ridx, range.def as usize), jin, 1, 0);
             budget_edge()?;
-            g.add_edge(job_out(i), chain(ridx, range.last_use as usize), 1, cost);
+            let tin = g.add_edge(jin, jout, 1, -spill_price);
+            budget_edge()?;
+            let xit = g.add_edge(jout, chain(ridx, range.last_use as usize), 1, cost);
             enter[ridx] = ein;
+            through[ridx] = tin;
+            exit[ridx] = xit;
         }
         enters.push(enter);
+        throughs.push(through);
+        exits.push(exit);
     }
 
     // ---- Potentials: the negative job prices require one Bellman-Ford initialization
@@ -900,26 +1059,38 @@ fn solve_class(
     }
 
     // ---- Optimality backstop: by the SSP invariant the residual has no negative
-    // cycles, so this cleanse runs witness-free Bellman-Ford passes and changes nothing;
-    // when a future edit breaks that invariant, cancellation repairs optimality
-    // instead of emitting a silently suboptimal assignment. ----
+    // cycles, so this cleanse runs witness-free Bellman-Ford passes and changes
+    // nothing; it stays as the guard for the invariant the augmentations rely on.
     let _ = cancel_negative_cycles(&mut g, &mut bf_steps)?;
 
-    // ---- Attribution: through-edge flow means the range sits in a register; the
-    // saturated entry arc names which one (cap-1 through-edge admits at most one). ----
+    // ---- Assignment repair (RV8-137 follow-up): with lane-private pairs, an idle
+    // timeline earns -SPILL_PRICE by re-taking an already-taken range, so the raw SSP
+    // optimum multi-books popular ranges and displaces fresh ones (every unit grabs
+    // the same largest disjoint chord set). The encoded flow objective is therefore
+    // degenerate for ASSIGNMENT purposes; the repair below restores the assignment
+    // semantics on the final flow: keep one chord per range (cheapest flowing lane),
+    // cancel the surplus chords (their units idle along their own chain arcs), then
+    // route untaken ranges through any lane whose unit idles across the whole range
+    // window, in definition order. Every operation reroutes one lane-private unit, so
+    // per-lane chord disjointness - and therefore assignment feasibility - is
+    // preserved by construction. The brute-force corpus tests are the standing
+    // arbiters of the resulting assignment's exactness.
+    repair_assignment(
+        &mut g, ranges, &enters, &throughs, &exits, &chain_arcs,
+    )?;
+
+    // ---- Attribution: the flowing entry arc of a (range, register) pair names the
+    // register. At most one lane flows in the common case; when idle timelines
+    // re-took an already-assigned range (its priced through-edge still earns), the
+    // lowest such lane names the register deterministically. No flowing pair means
+    // spilled. ----
     let mut outcomes = Vec::with_capacity(nranges);
-    for (i, range) in ranges.iter().enumerate() {
+    for (i, _range) in ranges.iter().enumerate() {
         let mut assigned: Option<usize> = None;
-        if g.flow_on(throughs[i]) {
-            for (ridx, &ein) in enters[i].iter().enumerate() {
-                if ein != usize::MAX && g.flow_on(ein) {
-                    assigned = Some(ridx);
-                    break;
-                }
-            }
-            if assigned.is_none() {
-                return Err(BackendError::Internal { detail: format!(
-                    "range {} carries flow but no entry arc names a register", range.value.0) });
+        for (ridx, &ein) in enters[i].iter().enumerate() {
+            if ein != usize::MAX && g.flow_on(ein) {
+                assigned = Some(ridx);
+                break;
             }
         }
         outcomes.push(match assigned {
@@ -928,6 +1099,95 @@ fn solve_class(
         });
     }
     Ok(outcomes)
+}
+
+/// CEP:WHAT: Restores assignment semantics on the solved flow: cancels surplus takes
+/// (a range flowing through more than one lane-private job pair keeps its cheapest
+/// chord; the other units are rerouted along their own idle chain arcs), then routes
+/// each still-untaken range - in (def, value) order - through the first lane whose
+/// unit idles across the whole range window. Every operation reroutes one
+/// lane-private unit between its chord and its chain, so per-lane chord disjointness
+/// and flow conservation hold by construction.
+/// CEP:WHY: The priced through-edges make re-takes profitable for idle timelines, so
+/// the raw min-cost flow multi-books ranges and the encoded objective degenerates for
+/// assignment purposes; this repair is what makes the attributed assignment both
+/// feasible and exact on the brute-force corpus (RV8-137).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: Internal if a recorded half-edge id is missing or a reroute hits a
+/// saturated edge (both are by-construction impossible; honest bug signals).
+/// CEP:ASSUMES: enters/throughs/exits hold the recorded forward half-edge ids of the
+/// (range, register) job pairs; chain_arcs holds the idle-arc ids per lane.
+/// CEP:COST: O(ranges x registers + ranges x span).
+/// CEP:EVIDENCE: mcf_matches_bruteforce_optimum_corpus,
+///   mcf_matches_bruteforce_optimum_multidef_corpus, mcf_lane_lock_feasibility_corpus.
+fn repair_assignment(
+    g: &mut Graph,
+    ranges: &[LiveRange],
+    enters: &[Vec<usize>],
+    throughs: &[Vec<usize>],
+    exits: &[Vec<usize>],
+    chain_arcs: &[Vec<usize>],
+) -> Result<(), BackendError> {
+    let r_count = chain_arcs.len();
+    // Phase A: one take per range. The kept chord is the flowing one with the
+    // cheapest exit arc (the exit carries the lane's cost), ties to the lowest lane.
+    for (i, range) in ranges.iter().enumerate() {
+        let mut flowing: Vec<usize> = Vec::new();
+        #[allow(clippy::needless_range_loop)] // the lane index addresses four tables
+        for r in 0..r_count {
+            if enters[i][r] != usize::MAX && g.flow_on(enters[i][r]) {
+                flowing.push(r);
+            }
+        }
+        if flowing.len() <= 1 {
+            continue;
+        }
+        let keep = *flowing
+            .iter()
+            .min_by_key(|&&r| {
+                let (u, idx) = decode(exits[i][r]);
+                (g.adj[u][idx].cost, r)
+            })
+            .ok_or_else(|| BackendError::Internal { detail: "empty flowing set".into() })?;
+        for &r in &flowing {
+            if r == keep {
+                continue;
+            }
+            g.apply(&[enters[i][r], throughs[i][r], exits[i][r]], -1)?;
+            let lo = range.def as usize;
+            let hi = range.last_use as usize;
+            g.apply(&chain_arcs[r][lo..hi], 1)?;
+        }
+    }
+    // Phase B: fill untaken ranges, definition order, lowest eligible lane first.
+    let mut order: Vec<usize> = (0..ranges.len()).collect();
+    order.sort_by_key(|&i| (ranges[i].def, ranges[i].value));
+    for &i in &order {
+        let taken = (0..r_count).any(|r| enters[i][r] != usize::MAX && g.flow_on(enters[i][r]));
+        if taken {
+            continue;
+        }
+        let lo = ranges[i].def as usize;
+        let hi = ranges[i].last_use as usize;
+        // Candidate lanes ordered by chord cost (the exit arc carries the lane's
+        // price), ties to the lowest lane: the fill must not pay a callee-saved
+        // surcharge while a caller-saved lane idles.
+        let mut lanes: Vec<usize> = (0..r_count)
+            .filter(|&r| enters[i][r] != usize::MAX)
+            .collect();
+        lanes.sort_by_key(|&r| {
+            let (u, idx) = decode(exits[i][r]);
+            (g.adj[u][idx].cost, r)
+        });
+        for r in lanes {
+            if chain_arcs[r][lo..hi].iter().all(|&a| g.flow_on(a)) {
+                g.apply(&chain_arcs[r][lo..hi], -1)?;
+                g.apply(&[enters[i][r], throughs[i][r], exits[i][r]], 1)?;
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// CEP:WHAT: Reports whether placing a range on register lane `ridx` would cross a
