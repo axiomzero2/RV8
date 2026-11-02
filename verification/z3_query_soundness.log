@@ -1,0 +1,5 @@
+PROVED  memo_soundness(n_deps=3)
+PROVED  memo_invalidation_completeness
+PROVED  cycle_detected_when_reentrant(depth=3)
+PROVED  cycle_stack_clean_when_idle(depth=3)
+ALL PROOFS PASSED

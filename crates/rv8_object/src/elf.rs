@@ -7,7 +7,7 @@
 //   must produce identical bytes, which is achieved by pure index-driven ordering (no hash
 //   iteration), stable sorts, and fixed padding.
 // CEP:CLASS: HPC-1
-// CEP:STATUS: complete (hot/cold section split is the named stub flag HOT_COLD_SPLIT below)
+// CEP:STATUS: complete (model, error, elf incl. hot/cold split, link)
 // CEP:OWNER: axiomzero2
 // CEP:TICKET: RV8-100
 // CEP:FAILURE: every emission step is bounds-checked; budget or bounds violations return
@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::ObjectError;
-use crate::model::{align_up, check_name, layout_order, ObjectFile, SectionType, Symbol, FLAG_ALLOC, MAX_STRING_TABLE_BYTES};
+use crate::model::{align_up, check_name, layout_order, ObjectFile, Section, SectionType, Symbol, FLAG_ALLOC, MAX_STRING_TABLE_BYTES};
 
 // --- ELF64 constants (named; x86-64 System V ABI numbers) ---
 
@@ -108,16 +108,62 @@ pub const ELF_PAGE_BYTES: u64 = 0x1000;
 /// CEP:EVIDENCE: checked in write_elf64_relocatable and link emission.
 pub const MAX_OUTPUT_SECTIONS: usize = 0xFE00;
 
-/// CEP:WHAT: Named flag for hot/cold section splitting (placing cold text into a separate
-///   segment). Currently disabled.
-/// CEP:WHY: The layout pipeline reserves the toggle point so a future pass can split
-///   sections without changing emission code paths.
-/// CEP:STATUS: stub (flag exists; splitting pass not implemented)
+/// CEP:WHAT: Named toggle for hot/cold section splitting (design.md 1618-1622): within the
+///   executable group, cold sections (names ending in ".cold") are placed after hot ones.
+/// CEP:WHY: Instruction-cache locality: hot code sits at the front of the RX group while
+///   cold error paths move to its end; the const keeps the pass switchable without touching
+///   emission code paths.
+/// CEP:STATUS: complete
 /// CEP:FAILURE: none
-/// CEP:ASSUMES: cold sections would be identified by a naming or flag convention.
-/// CEP:COST: compile-time constant.
-/// CEP:EVIDENCE: none yet (stub).
-pub const HOT_COLD_SPLIT: bool = false;
+/// CEP:ASSUMES: cold sections are identified by the deterministic ".cold" name suffix
+///   (is_cold_section below); the model carries no dedicated hot/cold attribute in this
+///   revision.
+/// CEP:COST: O(S) stable partition per emission.
+/// CEP:EVIDENCE: unit test rv8_object::elf::tests and
+///   crates/rv8_object/tests/serializers.rs::elf_hot_cold_split_orders_hot_first.
+pub const HOT_COLD_SPLIT: bool = true;
+
+/// CEP:WHAT: Deterministic hot/cold criterion: a section is cold when its name ends in
+///   ".cold" (covers ".text.cold" and per-function ".text.f.cold" spellings).
+/// CEP:WHY: One named predicate so writers and tests agree on the split rule.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: the ".cold" suffix convention; nothing else distinguishes cold code.
+/// CEP:COST: O(name).
+/// CEP:EVIDENCE: crates/rv8_object/tests/serializers.rs::elf_hot_cold_split_orders_hot_first.
+pub(crate) fn is_cold_section(name: &str) -> bool {
+    name.ends_with(".cold")
+}
+
+/// CEP:WHAT: Applies the hot/cold split to a layout order: inside the executable group
+///   (the contiguous prefix produced by model::layout_order), hot sections precede cold
+///   ones while both sides keep the underlying sort order (stable partition).
+/// CEP:WHY: The design.md 1618-1622 ordering rule in one auditable step; stability keeps
+///   determinism (same input, same order).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: `order` is the permutation returned by model::layout_order (exec sections
+///   form its prefix).
+/// CEP:COST: O(S) plus one boolean per section.
+/// CEP:EVIDENCE: crates/rv8_object/tests/serializers.rs::elf_hot_cold_split_orders_hot_first.
+pub(crate) fn split_hot_cold(sections: &[Section], order: &mut Vec<usize>) {
+    let exec_end = order
+        .iter()
+        .position(|&i| !sections[i].is_exec())
+        .unwrap_or(order.len());
+    let mut split: Vec<usize> = Vec::with_capacity(exec_end);
+    for &i in order.iter().take(exec_end) {
+        if !is_cold_section(&sections[i].name) {
+            split.push(i);
+        }
+    }
+    for &i in order.iter().take(exec_end) {
+        if is_cold_section(&sections[i].name) {
+            split.push(i);
+        }
+    }
+    order.splice(..exec_end, split);
+}
 
 /// CEP:WHAT: An ELF string table under construction with exact-duplicate reuse and suffix
 ///   sharing: a string whose NUL-terminated bytes already appear anywhere in the table
@@ -553,7 +599,8 @@ fn symbol_stt(obj: &ObjectFile, sym: &Symbol) -> u8 {
 /// CEP:WHAT: Emits a complete ELF64 relocatable object (ET_REL, EM_X86_64) from the
 ///   universal model, generating .symtab (locals first, sh_info = first global), .strtab,
 ///   .rela.X (SHT_RELA with ELF64_R_INFO(sym, RelocKind::elf_type())) and .shstrtab with
-///   suffix sharing, over sections laid out by permission group then descending alignment.
+///   suffix sharing, over sections laid out by permission group, hot before cold inside
+///   the executable group (HOT_COLD_SPLIT), then descending alignment.
 /// CEP:WHY: The compiler's object-file product; byte-determinism is the acceptance bar
 ///   (two runs over the same input emit identical bytes).
 /// CEP:STATUS: complete
@@ -569,7 +616,10 @@ pub fn write_elf64_relocatable(obj: &ObjectFile) -> Result<Vec<u8>, ObjectError>
     obj.validate()?;
 
     let n = obj.sections.len();
-    let order = layout_order(&obj.sections);
+    let mut order = layout_order(&obj.sections);
+    if HOT_COLD_SPLIT {
+        split_hot_cold(&obj.sections, &mut order);
+    }
 
     // Output slot bookkeeping: slot 0 is the mandatory null section header.
     let mut out_of_input = vec![0usize; n];

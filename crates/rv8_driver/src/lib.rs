@@ -13,5 +13,6 @@
 pub mod cache;
 pub mod error;
 pub mod pipeline;
+pub mod queries;
 pub mod query;
 pub mod session;

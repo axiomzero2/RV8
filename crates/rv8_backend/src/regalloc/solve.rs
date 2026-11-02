@@ -60,38 +60,23 @@ pub(crate) enum Outcome {
 // interval-assignment problem the brute-force checker enumerates; the corpus test is
 // the standing arbiter of that exactness claim.
 
-/// CEP:WHAT: Solves one register class as a min-cost multi-commodity flow:
-/// 1. Network: machine-timeline reduction (see the design note above); the
-///    job pair of (range, register) is omitted entirely when the range crosses a
-///    call/divide barrier of that register, as are pairs of non-matching registers
-///    for pinned ranges.
-/// 2. Potentials: one Bellman-Ford pass (super-source semantics) on the zero flow - the
-///    negative job-arc prices demand it, and the graph is acyclic so it converges.
-/// 3. Solve: R successive shortest paths (one per register timeline) with Johnson
-///    potentials maintained by `pot[v] += min(dist[v], dist[snk])` after each
-///    augmentation; the SSP theorem makes the final flow the exact minimum.
-/// 4. Optimality backstop: Bellman-Ford negative-cycle cleanse (a no-op while the SSP
-///    invariant holds, a repair if it ever regressed).
-/// 5. Attribution: the flowing entry arc of a (range, register) job pair names the
-///    register (lowest lane on the rare multi-take); no flowing pair means spilled.
-///
-/// CEP:WHY: THE core algorithm (STANDARDS 5.1), exactly as specified.
+/// CEP:WHAT: Builds the machine-timeline reduction (see the solve_class design note):
+/// one chain per register lane, one PRIVATE job pair per (range, register), the
+/// barrier and pin rules omitting job arcs, plus the recorded arc ids.
+/// CEP:WHY: The single network constructor for cold, warm, and incremental solves.
 /// CEP:STATUS: complete
-/// CEP:FAILURE: BudgetExceeded past named budgets; Internal for by-construction
-/// invariant violations (an R-unit flow always exists: every timeline can idle).
-/// CEP:ASSUMES: ranges have def < last_use; pins reference class registers.
-/// CEP:COST: module CEP:COST.
-/// CEP:EVIDENCE: mcf_matches_bruteforce_optimum_corpus,
-///   mcf_matches_bruteforce_optimum_multidef_corpus,
-///   mcf_lane_lock_feasibility_corpus.
+/// CEP:FAILURE: BudgetExceeded past the named budgets.
+/// CEP:ASSUMES: at most MAX_MCF_NODES nodes after the reduction.
+/// CEP:COST: O(ranges x registers + registers x points).
+/// CEP:EVIDENCE: the brute-force corpora (cold path) and the warm/incremental batches.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn solve_class(
+pub(crate) fn build_timeline_network(
     class_plan: &super::desc::ClassPlan,
     ranges: &[LiveRange],
     points: u32,
     barriers: &Barriers,
     costs: &super::desc::CostTable,
-) -> Result<Vec<Outcome>, BackendError> {
+) -> Result<TimelineNetwork, BackendError> {
     let regs: &[PhysReg] = &class_plan.lanes;
     let r_count = regs.len();
     let nranges = ranges.len();
@@ -124,12 +109,14 @@ pub(crate) fn solve_class(
     // forward half-edge id of every idle arc is recorded so surplus-take repair can
     // reroute a unit along its own chain (cancel_surplus_takes).
     let mut chain_arcs: Vec<Vec<usize>> = vec![Vec::new(); r_count];
+    let mut src_arcs: Vec<usize> = vec![usize::MAX; r_count];
+    let mut snk_arcs: Vec<usize> = vec![usize::MAX; r_count];
     #[allow(clippy::needless_range_loop)] // the lane index addresses three structures
     for ridx in 0..r_count {
         budget_edge()?;
-        g.add_edge(src, chain(ridx, 0), 1, 0);
+        src_arcs[ridx] = g.add_edge(src, chain(ridx, 0), 1, 0);
         budget_edge()?;
-        g.add_edge(chain(ridx, last_point - 1), snk, 1, 0);
+        snk_arcs[ridx] = g.add_edge(chain(ridx, last_point - 1), snk, 1, 0);
         let mut arcs = Vec::with_capacity(last_point - 1);
         for p in 0..last_point - 1 {
             budget_edge()?;
@@ -185,6 +172,70 @@ pub(crate) fn solve_class(
         throughs.push(through);
         exits.push(exit);
     }
+
+    Ok(TimelineNetwork { g, enters, throughs, exits, chain_arcs, src_arcs, snk_arcs })
+}
+
+/// CEP:WHAT: The timeline network and the recorded arc ids a solve needs: the flow
+/// graph, per-(range, register) job arcs (enter/through/exit), per-lane idle chain
+/// arcs, and the per-lane source/sink arcs.
+/// CEP:WHY: solve_class, the warm start, and the incremental re-solve all build the
+/// identical network (RV8-140); one builder keeps the three paths honest.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: BudgetExceeded past MAX_MCF_NODES / MAX_MCF_EDGES.
+/// CEP:ASSUMES: ranges have def < last_use; pins reference class registers.
+/// CEP:COST: O(ranges x registers + registers x points).
+/// CEP:EVIDENCE: all existing corpora and regression batches route through it.
+pub(crate) struct TimelineNetwork {
+    pub(crate) g: Graph,
+    pub(crate) enters: Vec<Vec<usize>>,
+    pub(crate) throughs: Vec<Vec<usize>>,
+    pub(crate) exits: Vec<Vec<usize>>,
+    pub(crate) chain_arcs: Vec<Vec<usize>>,
+    pub(crate) src_arcs: Vec<usize>,
+    pub(crate) snk_arcs: Vec<usize>,
+}
+
+/// CEP:WHAT: Solves one register class as a min-cost multi-commodity flow:
+/// 1. Network: machine-timeline reduction (see the design note above); the
+///    job pair of (range, register) is omitted entirely when the range crosses a
+///    call/divide barrier of that register, as are pairs of non-matching registers
+///    for pinned ranges.
+/// 2. Potentials: one Bellman-Ford pass (super-source semantics) on the zero flow - the
+///    negative job-arc prices demand it, and the graph is acyclic so it converges.
+/// 3. Solve: R successive shortest paths (one per register timeline) with Johnson
+///    potentials maintained by `pot[v] += min(dist[v], dist[snk])` after each
+///    augmentation; the SSP theorem makes the final flow the exact minimum.
+/// 4. Optimality backstop: Bellman-Ford negative-cycle cleanse (a no-op while the SSP
+///    invariant holds, a repair if it ever regressed).
+/// 5. Attribution: the flowing entry arc of a (range, register) job pair names the
+///    register (lowest lane on the rare multi-take); no flowing pair means spilled.
+///
+/// CEP:WHY: THE core algorithm (STANDARDS 5.1), exactly as specified.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: BudgetExceeded past named budgets; Internal for by-construction
+/// invariant violations (an R-unit flow always exists: every timeline can idle).
+/// CEP:ASSUMES: ranges have def < last_use; pins reference class registers.
+/// CEP:COST: module CEP:COST.
+/// CEP:EVIDENCE: mcf_matches_bruteforce_optimum_corpus,
+///   mcf_matches_bruteforce_optimum_multidef_corpus,
+///   mcf_lane_lock_feasibility_corpus.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn solve_class(
+    class_plan: &super::desc::ClassPlan,
+    ranges: &[LiveRange],
+    points: u32,
+    barriers: &Barriers,
+    costs: &super::desc::CostTable,
+) -> Result<Vec<Outcome>, BackendError> {
+    let regs: &[PhysReg] = &class_plan.lanes;
+    let r_count = regs.len();
+    let nranges = ranges.len();
+    let net = build_timeline_network(class_plan, ranges, points, barriers, costs)?;
+    let TimelineNetwork { mut g, enters, throughs, exits, chain_arcs, src_arcs: _, snk_arcs: _ } = net;
+    let _ = &exits;
+    let src = 0usize;
+    let snk = 1usize;
 
     // ---- Potentials: the negative job prices require one Bellman-Ford initialization
     // (super-source semantics); the timeline graph is acyclic before any flow, so this

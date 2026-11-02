@@ -15,21 +15,9 @@
 //   pipeline_runs_loop_program in this module.
 
 use crate::error::DriverError;
-use crate::query::StageHashes;
 use crate::session::{EmitMode, Session};
-use rv8_object::model::{ObjectFile, RelocKind as ObjRelocKind};
+use rv8_object::model::ObjectFile;
 
-/// CEP:WHAT: Renders a rv8_ir lowering error for a driver diagnostic.
-/// CEP:WHY: LowerError implements Debug but not Display; the driver formats without
-///   requiring changes to the frozen IR crate. Upgrade ticket: RV8-135.
-/// CEP:STATUS: complete
-/// CEP:FAILURE: none
-/// CEP:ASSUMES: LowerError derives Debug (it does).
-/// CEP:COST: allocation on error paths.
-/// CEP:EVIDENCE: used by compile in this module.
-fn ir_msg(e: rv8_ir::LowerError) -> String {
-    format!("{e:?}")
-}
 
 /// CEP:WHAT: The packed compilation output: one relocatable object holding every function
 ///   plus the stage-hash log gathered on the way.
@@ -40,6 +28,7 @@ fn ir_msg(e: rv8_ir::LowerError) -> String {
 /// CEP:ASSUMES: none
 /// CEP:COST: owns the object bytes.
 /// CEP:EVIDENCE: tests in this module.
+#[derive(Clone, Debug)]
 pub struct CompiledProgram {
     /// One object containing one `.text.fn<i>` section per function.
     pub object: ObjectFile,
@@ -49,98 +38,33 @@ pub struct CompiledProgram {
     pub stages: crate::query::StageLog,
 }
 
-/// CEP:WHAT: Compiles source text into a packed object through the whole pipeline.
-/// CEP:WHY: The single entry point main.rs calls; stage order is the normative pipeline.
+/// CEP:WHAT: Compiles source text into a packed object through the whole pipeline,
+///   demand-driven through the QueryDatabase (ProgramQuery over per-function
+///   queries; RV8-134): the stage order inside each query is the normative pipeline.
+/// CEP:WHY: The single entry point main.rs calls; design.md fixes the query-driven
+///   architecture and STANDARDS 5.10 the content-addressed invalidation.
 /// CEP:STATUS: complete
 /// CEP:FAILURE: DriverError::Stage naming the failing stage on any rejection.
 /// CEP:ASSUMES: src is UTF-8 Rust subset text.
-/// CEP:COST: linear in source size across all stages.
-/// CEP:EVIDENCE: test pipeline_runs_fixture_exit_13.
+/// CEP:COST: first demand compiles; re-demands on unchanged source are memo hits.
+/// CEP:EVIDENCE: test pipeline_runs_fixture_exit_13 and the query battery.
 pub fn compile(session: &Session, src: &str) -> Result<CompiledProgram, DriverError> {
-    let hirs = rv8_frontend::compile_source(src)
-        .map_err(|e| DriverError::Stage { stage: "frontend", message: e.to_string() })?;
-    let mut program = ObjectFile::new("rv8");
-    let mut stages = crate::query::StageLog::new();
-    let mut entry_symbol: Option<String> = None;
-
-    for (ordinal, hir) in hirs.iter().enumerate() {
-        let fn_name = hir.name.clone();
-        if fn_name == "main" {
-            entry_symbol = Some(fn_name.clone());
-        }
-        // Level 0 -> Level 1: flatten the region tree into the Sea of Nodes.
-        let mut sea = rv8_ir::lowering::hir_to_son(hir)
-            .map_err(|e| DriverError::Stage { stage: "hir_to_son", message: ir_msg(e) })?;
-        let son_hash = sea.canonical_hash();
-        // Borrow checking (graph CSP) before optimization mutates anything.
-        let borrow = rv8_middle::borrowck::check(&sea)
-            .map_err(|e| DriverError::Stage { stage: "borrowck", message: e.to_string() })?;
-        if !borrow.conflicts.is_empty() {
-            return Err(DriverError::Stage {
-                stage: "borrowck",
-                message: format!("{:?}", borrow.conflicts),
-            });
-        }
-        // Middle end: constant folding, GVN, DCE; verify after every pass inside.
-        let _summary_son = rv8_middle::pipeline::optimize_son(&mut sea)
-            .map_err(|e| DriverError::Stage { stage: "optimize_son", message: e.to_string() })?;
-        let son_opt_hash = sea.canonical_hash();
-        // Level 1 -> Level 2: linearize into the Heterogeneous IR.
-        let mut het = rv8_ir::lower_het::son_to_hetir(&sea)
-            .map_err(|e| DriverError::Stage { stage: "son_to_hetir", message: ir_msg(e) })?;
-        let het_hash = het.canonical_hash();
-        // HetIR dead-node elimination per spec 3.3.4.
-        let _summary_het = rv8_middle::pipeline::optimize_hetir(&mut het)
-            .map_err(|e| DriverError::Stage { stage: "optimize_hetir", message: e.to_string() })?;
-        let het_opt_hash = het.canonical_hash();
-        // Level 2 -> Level 3: target-independent virtual-register LIR.
-        let lir = rv8_ir::lower_het::hetir_to_lir(&het, &fn_name)
-            .map_err(|e| DriverError::Stage { stage: "hetir_to_lir", message: ir_msg(e) })?;
-        // Level 3 -> Level 4 -> bytes: isel, MCF allocation, scheduling, encoding.
-        let symbol = rv8_backend::encode::call_symbol_name(ordinal as i64);
-        let out = rv8_backend::compile_lir(&lir, &symbol)
-            .map_err(|e| DriverError::Stage { stage: "backend", message: e.to_string() })?;
-        let mir_hash = rv8_core::hash::fxhash64(&out.code);
-
-        // Pack: one section per function; callers relocate against fn{ordinal}, and the
-        // real function name is an alias symbol at the same address so the linker and
-        // synthesize_start can use plain names.
-        let sec = program
-            .add_text_section(&format!(".text.{symbol}"), 16, out.code.clone())
-            .map_err(|e| DriverError::Stage { stage: "object", message: e.to_string() })?;
-        for r in &out.relocs {
-            let kind = match r.kind {
-                rv8_backend::encode::RelocKind::Abs64 => ObjRelocKind::Abs64,
-                rv8_backend::encode::RelocKind::PcRel32 => ObjRelocKind::PcRel32,
-            };
-            program
-                .add_reloc(sec, r.offset, kind, &r.symbol, r.addend)
-                .map_err(|e| DriverError::Stage { stage: "object", message: e.to_string() })?;
-        }
-        program
-            .add_symbol(&symbol, true, true, Some(sec), 0, out.code.len() as u64)
-            .map_err(|e| DriverError::Stage { stage: "object", message: e.to_string() })?;
-        program
-            .add_symbol(&fn_name, true, true, Some(sec), 0, out.code.len() as u64)
-            .map_err(|e| DriverError::Stage { stage: "object", message: e.to_string() })?;
-
-        stages.record(StageHashes {
-            function: fn_name,
-            son: son_hash,
-            son_opt: son_opt_hash,
-            het: het_hash,
-            het_opt: het_opt_hash,
-            mir: mir_hash,
-        });
-    }
-
-    if session.emit == EmitMode::Run && entry_symbol.is_none() {
+    let mut db = crate::query::QueryDatabase::new();
+    db.set_input(crate::queries::SOURCE_INPUT, src.as_bytes())
+        .map_err(|e| DriverError::Stage { stage: "query", message: e.to_string() })?;
+    let program = db
+        .get::<crate::queries::ProgramQuery>("")
+        .map_err(|e| match e {
+            crate::query::QueryError::Computation(d) => d,
+            other => DriverError::Stage { stage: "query", message: other.to_string() },
+        })?;
+    if session.emit == EmitMode::Run && program.entry_symbol.is_none() {
         return Err(DriverError::Stage {
             stage: "link",
             message: "no function named main: run mode requires an entry point".to_string(),
         });
     }
-    Ok(CompiledProgram { object: program, entry_symbol, stages })
+    Ok(program)
 }
 
 /// CEP:WHAT: Serializes the compiled program as a deterministic ELF64 relocatable.

@@ -18,7 +18,7 @@ use std::fmt;
 /// CEP:ASSUMES: none
 /// CEP:COST: allocation only on error paths.
 /// CEP:EVIDENCE: unit tests rv8_driver::error::tests::display_is_stable.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DriverError {
     /// Malformed CLI invocation.
     Usage(String),

@@ -2,13 +2,15 @@
 # CEP:WHAT: Manifest for rv8_runtime, the zero-dependency runtime linked into compiled programs.
 # CEP:WHY: Generated code must run without libc or std; this crate is no_std at its root.
 # CEP:CLASS: HPC-1
-# CEP:STATUS: stub
+# CEP:STATUS: complete
 # CEP:OWNER: axiomzero2
 # CEP:TICKET: RV8-100
 # CEP:FAILURE: none
-# CEP:ASSUMES: std feature enabled only for tests.
+# CEP:ASSUMES: the crate is no_std outside cfg(test); host tests run under the test
+#   harness's std; zero external dependencies (first-party workspace only).
 # CEP:COST: cold.
-# CEP:EVIDENCE: workspace build.
+# CEP:EVIDENCE: cargo build/test/clippy/doc gates over crates/rv8_runtime and the
+#   integration suite crates/rv8_runtime/tests/runtime_foundation.rs.
 [package]
 name = "rv8_runtime"
 version.workspace = true

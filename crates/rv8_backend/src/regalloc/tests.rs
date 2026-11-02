@@ -428,3 +428,295 @@ use MachineOperand::Reg;
         assert!(loads > 0 && stores > 0, "both spill directions must appear");
     }
 
+
+// ---------------------------------------------------------------------------
+// RV8-140 batch: linear-scan warm start and incremental/region re-solve over the
+// ONE shared timeline network. The corpora arbitrate exactness (warm) and identity
+// (incremental on unchanged input); feasibility and determinism are asserted
+// everywhere.
+// ---------------------------------------------------------------------------
+
+/// CEP:WHAT: Builds a corpus-style function from defs/uses tables (one instruction
+/// per program point, filler points carry no definition, Ret terminates).
+/// CEP:WHY: Shared fixture for the warm/incremental batch; mirrors the corpus shape.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via expect (test-only).
+/// CEP:ASSUMES: defs[i] >= 1; uses[i] > defs[i].
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this batch.
+fn build_corpus_fn(name: &str, defs: &[u32], uses: &[u32], n: usize) -> (rv8_ir::lir::LirFunction, Vec<ValueId>) {
+    use rv8_ir::lir::LirBlock;
+    use rv8_ir::son::BlockId;
+    let mut f = LirFunction::new(name);
+    let ids: Vec<ValueId> = (0..n).map(|_| val(&mut f)).collect();
+    let max_point = uses.iter().copied().max().unwrap_or(1);
+    let mut point_defs: Vec<Option<ValueId>> = vec![None; max_point as usize];
+    let mut point_uses: Vec<Vec<ValueId>> = vec![Vec::new(); max_point as usize];
+    let mut ord: Vec<usize> = (0..ids.len()).collect();
+    ord.sort_by_key(|&i| (defs[i], ids[i]));
+    for &i in &ord {
+        point_defs[(defs[i] - 1) as usize] = Some(ids[i]);
+    }
+    for i in 0..ids.len() {
+        point_uses[(uses[i] - 1) as usize].push(ids[i]);
+    }
+    let mut block = LirBlock::new(BlockId(0));
+    for p in 0..max_point as usize {
+        let mut instr = li(MachineOpcode::MovRegImm32, vec![], point_defs[p], p as i64);
+        instr.operands = point_uses[p].clone();
+        block.push(instr);
+    }
+    block.push(li(MachineOpcode::Ret, vec![], None, 0));
+    f.push_block(block);
+    (f, ids)
+}
+
+/// CEP:WHAT: Random corpus instance generator shared by the batch.
+/// CEP:WHY: Deterministic instances from fixed seeds (SplitMix64), same shape as the
+/// optimality corpus.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: none
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this batch.
+fn random_instance(seed: u64) -> (Vec<u32>, Vec<u32>, usize) {
+    use rv8_core::rng::SplitMix64;
+    let mut rng = SplitMix64::seed_from_u64(seed);
+    let n = 2 + (rng.next_u64() % 3) as usize;
+    let span = 6u64;
+    let mut defs = Vec::new();
+    let mut uses = Vec::new();
+    let mut used_points = std::collections::BTreeSet::new();
+    for _ in 0..n {
+        let mut d = (rng.next_u64() % span) as u32 + 1;
+        while !used_points.insert(d) {
+            d = d % (span as u32) + 1;
+        }
+        let len = 1 + (rng.next_u64() % span) as u32;
+        defs.push(d);
+        uses.push(d + len);
+    }
+    (defs, uses, n)
+}
+
+/// CEP:WHAT: The warm-started solve matches the brute-force optimum on the whole
+/// single-def corpus (24 seeds).
+/// CEP:WHY: Exactness acceptance for RV8-140 warm start; the corpus is the arbiter.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: none
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this test.
+#[test]
+fn warm_start_matches_bruteforce_optimum_corpus() {
+    let nregs = abi::ALLOCATABLE_GPRS.len();
+    let mut failures: Vec<String> = Vec::new();
+    for seed in 0x9000u64..0x9000 + 24 {
+        let (defs, uses, n) = random_instance(seed);
+        let (f, ids) = build_corpus_fn("warm", &defs, &uses, n);
+        let plan = desc::x86_64_plan();
+        let alloc = allocate_warm(&plan, &f)
+            .unwrap_or_else(|e| panic!("seed {seed}: warm allocate failed: {e}"));
+        let assign: Vec<Option<usize>> = (0..n)
+            .map(|i| alloc.register(ids[i]).map(|r| r.0 as usize))
+            .collect();
+        if !feasible(&defs, &uses, &assign, nregs) {
+            failures.push(format!("seed {seed}: warm infeasible {assign:?}"));
+            continue;
+        }
+        let mut best: Option<i64> = None;
+        let total = (nregs + 1).pow(n as u32);
+        for code in 0..total {
+            let mut a = vec![None; n];
+            let mut c = code;
+            for x in a.iter_mut().take(n) {
+                let choice = c % (nregs + 1);
+                c /= nregs + 1;
+                *x = if choice == nregs { None } else { Some(choice) };
+            }
+            if feasible(&defs, &uses, &a, nregs) {
+                let cost = assignment_cost(&a);
+                best = Some(best.map_or(cost, |b: i64| b.min(cost)));
+            }
+        }
+        let brute = best.expect("spill-only assignment is always feasible");
+        let warm_cost = assignment_cost(&assign);
+        if warm_cost != brute {
+            failures.push(format!(
+                "seed {seed}: warm {warm_cost} != brute {brute} (defs {defs:?} uses {uses:?} got {assign:?})"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "warm optimality failures:\n{}", failures.join("\n"));
+}
+
+/// CEP:WHAT: Warm and cold paths produce identical-cost (and typically identical)
+/// assignments on the corpus, and warm is deterministic across runs.
+/// CEP:WHY: The warm start is an accelerator, not a different allocator.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: none
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this test.
+#[test]
+fn warm_start_agrees_with_cold_and_is_deterministic() {
+    for seed in 0xA140u64..0xA140 + 20 {
+        let (defs, uses, n) = random_instance(seed);
+        let (f, ids) = build_corpus_fn("warmcold", &defs, &uses, n);
+        let plan = desc::x86_64_plan();
+        let cold = allocate(&f).unwrap();
+        let warm1 = allocate_warm(&plan, &f).unwrap();
+        let warm2 = allocate_warm(&plan, &f).unwrap();
+        assert_eq!(format!("{warm1:?}"), format!("{warm2:?}"), "seed {seed}: warm deterministic");
+        let cost = |a: &rv8_ir::lir::RegisterAllocation| -> i64 {
+            let assign: Vec<Option<usize>> = (0..ids.len())
+                .map(|i| a.register(ids[i]).map(|r| r.0 as usize))
+                .collect();
+            assignment_cost(&assign)
+        };
+        assert_eq!(cost(&cold), cost(&warm1), "seed {seed}: warm cost equals cold cost");
+    }
+}
+
+/// CEP:WHAT: Under extreme pressure the warm path spills honestly and stays feasible
+/// and deterministic.
+/// CEP:WHY: Feasibility holds by construction; the test pins it under stress.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: none
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this test.
+#[test]
+fn warm_start_spills_under_pressure_and_verifies() {
+    let nregs = abi::ALLOCATABLE_GPRS.len();
+    for seed in 0xB140u64..0xB140 + 12 {
+        let n = nregs * 2 + 2; // guaranteed over-subscription
+        let defs: Vec<u32> = (1..=n as u32).collect();
+        let uses: Vec<u32> = defs.iter().map(|d| d + n as u32).collect();
+        let (f2, ids) = build_corpus_fn("pressure", &defs, &uses, n);
+        let plan = desc::x86_64_plan();
+        let alloc = allocate_warm(&plan, &f2).unwrap();
+        let assign: Vec<Option<usize>> = (0..n)
+            .map(|i| alloc.register(ids[i]).map(|r| r.0 as usize))
+            .collect();
+        let spilled = assign.iter().filter(|a| a.is_none()).count();
+        assert!(spilled >= n - nregs, "seed {seed}: expected real spilling");
+        assert!(feasible(&defs, &uses, &assign, nregs), "seed {seed}: infeasible under pressure");
+        let alloc2 = allocate_warm(&plan, &f2).unwrap();
+        assert_eq!(format!("{alloc:?}"), format!("{alloc2:?}"), "seed {seed}: deterministic");
+    }
+}
+
+/// CEP:WHAT: The incremental re-solve is EXACTLY the cold allocation when nothing
+/// changed (assignments and spill slots identical).
+/// CEP:WHY: Identity on unchanged input is the correctness baseline (design.md 7.2).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: none
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this test.
+#[test]
+fn incremental_resolve_is_identity_when_unchanged() {
+    for seed in 0xC140u64..0xC140 + 20 {
+        let (defs, uses, n) = random_instance(seed);
+        let (f, _ids) = build_corpus_fn("inc", &defs, &uses, n);
+        let plan = desc::x86_64_plan();
+        let cold = allocate(&f).unwrap();
+        let inc = allocate_incremental(&plan, &f, &cold, &[]).unwrap();
+        assert_eq!(
+            format!("{cold:?}"),
+            format!("{inc:?}"),
+            "seed {seed}: incremental must be identity on unchanged input"
+        );
+    }
+}
+
+/// CEP:WHAT: After a change (half the values re-routed), the incremental re-solve
+/// stays feasible, deterministic, and never costs more than the all-spill baseline.
+/// CEP:WHY: The edit-compile contract: feasible fast answers, honest fallback.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: none
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this test.
+#[test]
+fn incremental_resolve_keeps_feasibility_after_change() {
+    let nregs = abi::ALLOCATABLE_GPRS.len();
+    for seed in 0xD140u64..0xD140 + 16 {
+        let (defs, uses, n) = random_instance(seed);
+        let (f, ids) = build_corpus_fn("incchg", &defs, &uses, n);
+        let plan = desc::x86_64_plan();
+        let cold = allocate(&f).unwrap();
+        let changed: Vec<ValueId> = ids.iter().take(n / 2 + 1).copied().collect();
+        let inc = allocate_incremental(&plan, &f, &cold, &changed).unwrap();
+        let assign: Vec<Option<usize>> = (0..n)
+            .map(|i| inc.register(ids[i]).map(|r| r.0 as usize))
+            .collect();
+        assert!(
+            feasible(&defs, &uses, &assign, nregs),
+            "seed {seed}: incremental infeasible {assign:?}"
+        );
+        let inc2 = allocate_incremental(&plan, &f, &cold, &changed).unwrap();
+        assert_eq!(format!("{inc:?}"), format!("{inc2:?}"), "seed {seed}: deterministic");
+        // Never worse than spilling everything.
+        let all_spill: Vec<Option<usize>> = vec![None; n];
+        assert!(assignment_cost(&assign) <= assignment_cost(&all_spill));
+    }
+}
+
+/// CEP:WHAT: Incremental with EVERY value changed still reaches the cold optimum.
+/// CEP:WHY: The changed set being the whole function degenerates to a full re-solve.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: none
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this test.
+#[test]
+fn incremental_matches_cold_when_everything_changed() {
+    for seed in 0xE140u64..0xE140 + 12 {
+        let (defs, uses, n) = random_instance(seed);
+        let (f, ids) = build_corpus_fn("incall", &defs, &uses, n);
+        let plan = desc::x86_64_plan();
+        let cold = allocate(&f).unwrap();
+        let prev = allocate_incremental(&plan, &f, &cold, &[]).unwrap();
+        let inc = allocate_incremental(&plan, &f, &prev, &ids).unwrap();
+        let cost = |a: &rv8_ir::lir::RegisterAllocation| -> i64 {
+            let assign: Vec<Option<usize>> = (0..ids.len())
+                .map(|i| a.register(ids[i]).map(|r| r.0 as usize))
+                .collect();
+            assignment_cost(&assign)
+        };
+        assert_eq!(cost(&cold), cost(&inc), "seed {seed}: all-changed equals cold cost");
+    }
+}
+
+/// CEP:WHAT: A prev allocation from a DIFFERENT LIR shape (points shifted by an
+/// inserted instruction) still produces a feasible, deterministic allocation via the
+/// documented fallback.
+/// CEP:WHY: Fail-closed fallback instead of a stale-lane miscompile.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: none
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this test.
+#[test]
+fn incremental_falls_back_gracefully_on_shifted_points() {
+    let nregs = abi::ALLOCATABLE_GPRS.len();
+    let (defs, uses, n) = random_instance(0xF140);
+    let (f1, ids) = build_corpus_fn("shift1", &defs, &uses, n);
+    let prev = allocate(&f1).unwrap();
+    // LIR v2: one extra live value shifts every point after it.
+    let mut defs2 = defs.clone();
+    let mut uses2 = uses.clone();
+    defs2.push(1);
+    uses2.push(2);
+    let (f2, ids2) = build_corpus_fn("shift2", &defs2, &uses2, n + 1);
+    let plan = desc::x86_64_plan();
+    let inc = allocate_incremental(&plan, &f2, &prev, &ids).unwrap();
+    let assign: Vec<Option<usize>> = (0..n + 1)
+        .map(|i| inc.register(ids2[i]).map(|r| r.0 as usize))
+        .collect();
+    assert!(feasible(&defs2, &uses2, &assign, nregs), "fallback must stay feasible");
+    let inc2 = allocate_incremental(&plan, &f2, &prev, &ids).unwrap();
+    assert_eq!(format!("{inc:?}"), format!("{inc2:?}"), "fallback deterministic");
+}

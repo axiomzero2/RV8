@@ -20,7 +20,8 @@ use std::fmt;
 ///   truncated or malformed inputs impossible to turn into panics.
 /// CEP:STATUS: complete
 /// CEP:FAILURE: none
-/// CEP:ASSUMES: variant set covers all named budgets in model.rs plus link/elf failure modes.
+/// CEP:ASSUMES: variant set covers all named budgets in model.rs plus link/elf failure modes
+///   and the line-table contract of LineTable::add_row (InvalidLineRow).
 /// CEP:COST: size <= 64 bytes per value; construction allocates only context Strings.
 /// CEP:EVIDENCE: unit tests rv8_object::model::tests, elf::tests, link::tests and integration
 ///   tests in crates/rv8_object/tests/acceptance.rs construct each rejection path.
@@ -144,6 +145,13 @@ pub enum ObjectError {
         /// Bytes the write needed.
         need: usize,
     },
+    /// A line-table row violates its structural contract (row-level field out of range).
+    InvalidLineRow {
+        /// Zero-based position the row would occupy in the table.
+        row: usize,
+        /// Why the row was rejected.
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for ObjectError {
@@ -214,6 +222,9 @@ impl fmt::Display for ObjectError {
             ObjectError::WriteOutOfBounds { offset, len, need } => {
                 write!(f, "write at offset {offset} needs {need} byte(s), buffer holds {len}")
             }
+            ObjectError::InvalidLineRow { row, reason } => {
+                write!(f, "line-table row {row} is invalid: {reason}")
+            }
         }
     }
 }
@@ -247,5 +258,7 @@ pub mod tests {
         };
         assert!(e.to_string().contains("PcRel32"));
         assert_eq!(ObjectError::Unsupported("macho").to_string(), "unsupported operation: macho");
+        let e = ObjectError::InvalidLineRow { row: 3, reason: "line rows must reference file index 0" };
+        assert!(e.to_string().contains("row 3"));
     }
 }

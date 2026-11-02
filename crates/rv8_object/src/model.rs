@@ -673,6 +673,226 @@ pub(crate) fn layout_order(sections: &[Section]) -> Vec<usize> {
     idx
 }
 
+// --- Minimal debug-provenance types (RV8-100 task 2-a) ---
+
+/// CEP:WHAT: Maximum number of rows in one LineTable.
+/// CEP:WHY: Named budget (standard section 2.6) bounding DWARF line-program emission and
+///   the row vector itself.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: LineTable::add_row reports BudgetExceeded.
+/// CEP:ASSUMES: none
+/// CEP:COST: compile-time constant.
+/// CEP:EVIDENCE: unit test rv8_object::model::tests::line_table_budget_and_rules.
+pub const MAX_LINE_ROWS: usize = 1 << 20;
+
+/// CEP:WHAT: Maximum source line number storable in one LineRow.
+/// CEP:WHY: DWARF32 line registers are 32-bit; the bound keeps line deltas inside i64 and
+///   the emitted SLEB128 operands small.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: LineTable::add_row reports InvalidLineRow.
+/// CEP:ASSUMES: none
+/// CEP:COST: compile-time constant.
+/// CEP:EVIDENCE: unit test rv8_object::model::tests::line_table_budget_and_rules.
+pub const MAX_LINE_NUMBER: u64 = 0xFFFF_FFFF;
+
+/// CEP:WHAT: The primitive scalar types the universal model can name for DWARF base-type
+///   DIEs.
+/// CEP:WHY: Debug emission needs one fixed vocabulary of scalar types shared between the
+///   backend and the DWARF writer; the model is that vocabulary (design.md section 5).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: byte_size matches the x86-64 ABI for each scalar; new variants are
+///   append-only so the DWARF encoding table in dwarf.rs stays exhaustive.
+/// CEP:COST: Copy enum.
+/// CEP:EVIDENCE: unit test rv8_object::model::tests::primitive_type_domains; DWARF mapping
+///   exercised by crates/rv8_object/tests/serializers.rs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrimitiveType {
+    /// Signed 8-bit integer.
+    I8,
+    /// Signed 16-bit integer.
+    I16,
+    /// Signed 32-bit integer.
+    I32,
+    /// Signed 64-bit integer.
+    I64,
+    /// Unsigned 8-bit integer.
+    U8,
+    /// Unsigned 16-bit integer.
+    U16,
+    /// Unsigned 32-bit integer.
+    U32,
+    /// Unsigned 64-bit integer.
+    U64,
+    /// IEEE-754 single precision.
+    F32,
+    /// IEEE-754 double precision.
+    F64,
+    /// Boolean (one byte, zero or one).
+    Bool,
+}
+
+impl PrimitiveType {
+    /// CEP:WHAT: Canonical type name emitted into DW_AT_name.
+    /// CEP:WHY: One spelling per variant keeps debug output deterministic.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: none
+    /// CEP:ASSUMES: none
+    /// CEP:COST: O(1).
+    /// CEP:EVIDENCE: unit test rv8_object::model::tests::primitive_type_domains.
+    pub fn name(self) -> &'static str {
+        match self {
+            PrimitiveType::I8 => "i8",
+            PrimitiveType::I16 => "i16",
+            PrimitiveType::I32 => "i32",
+            PrimitiveType::I64 => "i64",
+            PrimitiveType::U8 => "u8",
+            PrimitiveType::U16 => "u16",
+            PrimitiveType::U32 => "u32",
+            PrimitiveType::U64 => "u64",
+            PrimitiveType::F32 => "f32",
+            PrimitiveType::F64 => "f64",
+            PrimitiveType::Bool => "bool",
+        }
+    }
+
+    /// CEP:WHAT: Width in bytes per the x86-64 ABI.
+    /// CEP:WHY: DW_AT_byte_size needs the ABI width; one source of truth.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: none
+    /// CEP:ASSUMES: none
+    /// CEP:COST: O(1).
+    /// CEP:EVIDENCE: unit test rv8_object::model::tests::primitive_type_domains.
+    pub fn byte_size(self) -> u64 {
+        match self {
+            PrimitiveType::I8 | PrimitiveType::U8 | PrimitiveType::Bool => 1,
+            PrimitiveType::I16 | PrimitiveType::U16 => 2,
+            PrimitiveType::I32 | PrimitiveType::U32 | PrimitiveType::F32 => 4,
+            PrimitiveType::I64 | PrimitiveType::U64 | PrimitiveType::F64 => 8,
+        }
+    }
+}
+
+/// CEP:WHAT: One row of a source line table: binary address, file index, line, column,
+///   statement flag, and end-of-sequence marker.
+/// CEP:WHY: Model-side plumbing for the DWARF line-number program (design.md 1701-1745);
+///   the backend fills rows from machine-IR provenance and dwarf.rs serializes them.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none (construction is validated by LineTable::add_row).
+/// CEP:ASSUMES: `file` indexes the single-file table (always 0 in this revision); rows are
+///   stored in insertion order and sorted stably by address at emission.
+/// CEP:COST: inline data.
+/// CEP:EVIDENCE: unit test rv8_object::model::tests::line_table_budget_and_rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineRow {
+    /// Address the row maps (section-relative for relocatable objects).
+    pub address: u64,
+    /// File index (single-file tables use 0 only).
+    pub file: u64,
+    /// Source line number, at most MAX_LINE_NUMBER.
+    pub line: u64,
+    /// Source column (0 when unknown).
+    pub column: u64,
+    /// True when the row begins a new statement.
+    pub is_stmt: bool,
+    /// True when the row ends a line-number sequence.
+    pub end_sequence: bool,
+}
+
+/// CEP:WHAT: A source file's line table: one file name plus ordered rows.
+/// CEP:WHY: Minimal model-side plumbing for DWARF line emission; owned construction with
+///   named budgets keeps row data bounded before any writer touches it.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: new/add_row return InvalidName, InvalidLineRow, or BudgetExceeded
+///   (MAX_LINE_ROWS); the library never panics.
+/// CEP:ASSUMES: one file per table (file index 0); duplicate addresses are legal
+///   (several boundaries may share one address).
+/// CEP:COST: amortized O(1) per row; rows() borrows without copying.
+/// CEP:EVIDENCE: unit test rv8_object::model::tests::line_table_budget_and_rules; the DWARF
+///   line-program tests in crates/rv8_object/tests/serializers.rs consume this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineTable {
+    file_name: String,
+    rows: Vec<LineRow>,
+}
+
+impl LineTable {
+    /// CEP:WHAT: Creates an empty line table for one source file.
+    /// CEP:WHY: Entry point of the line-table builder API.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: InvalidName when the file name is oversize or contains NUL.
+    /// CEP:ASSUMES: none
+    /// CEP:COST: O(file name length).
+    /// CEP:EVIDENCE: unit test rv8_object::model::tests::line_table_budget_and_rules.
+    pub fn new(file_name: &str) -> Result<LineTable, ObjectError> {
+        check_name(file_name)?;
+        Ok(LineTable { file_name: file_name.to_string(), rows: Vec::new() })
+    }
+
+    /// CEP:WHAT: Appends one validated row.
+    /// CEP:WHY: Single funnel for row construction; enforces budgets and the single-file
+    ///   contract before mutation.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: BudgetExceeded (MAX_LINE_ROWS), InvalidLineRow (file index other than 0
+    ///   or line above MAX_LINE_NUMBER); fails closed before mutation.
+    /// CEP:ASSUMES: rows may be appended in any address order; emission sorts stably.
+    /// CEP:COST: amortized O(1).
+    /// CEP:EVIDENCE: unit test rv8_object::model::tests::line_table_budget_and_rules.
+    pub fn add_row(
+        &mut self,
+        address: u64,
+        file: u64,
+        line: u64,
+        column: u64,
+        is_stmt: bool,
+        end_sequence: bool,
+    ) -> Result<(), ObjectError> {
+        if self.rows.len() >= MAX_LINE_ROWS {
+            return Err(ObjectError::BudgetExceeded {
+                what: "MAX_LINE_ROWS",
+                limit: MAX_LINE_ROWS as u64,
+                actual: self.rows.len() as u64 + 1,
+            });
+        }
+        if file != 0 {
+            return Err(ObjectError::InvalidLineRow {
+                row: self.rows.len(),
+                reason: "line rows must reference file index 0",
+            });
+        }
+        if line > MAX_LINE_NUMBER {
+            return Err(ObjectError::InvalidLineRow {
+                row: self.rows.len(),
+                reason: "line number exceeds MAX_LINE_NUMBER",
+            });
+        }
+        self.rows.push(LineRow { address, file, line, column, is_stmt, end_sequence });
+        Ok(())
+    }
+
+    /// CEP:WHAT: The table's file name.
+    /// CEP:WHY: DWARF file-name entries need it without exposing the field.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: none
+    /// CEP:ASSUMES: none
+    /// CEP:COST: O(1).
+    /// CEP:EVIDENCE: used by dwarf.rs line-header emission.
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    /// CEP:WHAT: The rows in insertion order.
+    /// CEP:WHY: Writers sort a borrowed copy; the table never mutates on read.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: none
+    /// CEP:ASSUMES: none
+    /// CEP:COST: O(1).
+    /// CEP:EVIDENCE: used by dwarf.rs line-program emission.
+    pub fn rows(&self) -> &[LineRow] {
+        &self.rows
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -916,5 +1136,74 @@ pub mod tests {
             mk(".b", FLAG_ALLOC | FLAG_EXEC, 16, SectionType::Progbits),
         ];
         assert_eq!(layout_order(&ties), vec![0, 1]);
+    }
+
+    /// CEP:WHAT: PrimitiveType name/byte_size domains for every variant.
+    /// CEP:WHY: Pins the DWARF base-type vocabulary shared with dwarf.rs.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: panics via assert on mismatch (test-only).
+    /// CEP:ASSUMES: none
+    /// CEP:COST: test-only.
+    /// CEP:EVIDENCE: this test.
+    #[test]
+    fn primitive_type_domains() {
+        let cases = [
+            (PrimitiveType::I8, "i8", 1),
+            (PrimitiveType::I16, "i16", 2),
+            (PrimitiveType::I32, "i32", 4),
+            (PrimitiveType::I64, "i64", 8),
+            (PrimitiveType::U8, "u8", 1),
+            (PrimitiveType::U16, "u16", 2),
+            (PrimitiveType::U32, "u32", 4),
+            (PrimitiveType::U64, "u64", 8),
+            (PrimitiveType::F32, "f32", 4),
+            (PrimitiveType::F64, "f64", 8),
+            (PrimitiveType::Bool, "bool", 1),
+        ];
+        for (ty, name, size) in cases {
+            assert_eq!(ty.name(), name);
+            assert_eq!(ty.byte_size(), size);
+        }
+    }
+
+    /// CEP:WHAT: LineTable budgets and row rules: file index must be 0, line numbers are
+    ///   capped, MAX_LINE_ROWS is enforced, and the file name is validated.
+    /// CEP:WHY: Fail-closed construction contract for the DWARF plumbing.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: panics via unwrap/assert on mismatch (test-only).
+    /// CEP:ASSUMES: none
+    /// CEP:COST: test-only.
+    /// CEP:EVIDENCE: this test.
+    #[test]
+    fn line_table_budget_and_rules() {
+        assert!(matches!(LineTable::new("bad\0name"), Err(ObjectError::InvalidName { .. })));
+        let mut t = LineTable::new("main.rs").unwrap();
+        assert_eq!(t.file_name(), "main.rs");
+        assert!(t.rows().is_empty());
+        t.add_row(4, 0, 2, 0, true, false).unwrap();
+        t.add_row(8, 0, 5, 3, true, true).unwrap();
+        assert_eq!(t.rows().len(), 2);
+        assert_eq!(
+            t.add_row(8, 1, 5, 0, true, false),
+            Err(ObjectError::InvalidLineRow {
+                row: 2,
+                reason: "line rows must reference file index 0"
+            })
+        );
+        assert_eq!(
+            t.add_row(8, 0, MAX_LINE_NUMBER + 1, 0, true, false),
+            Err(ObjectError::InvalidLineRow {
+                row: 2,
+                reason: "line number exceeds MAX_LINE_NUMBER"
+            })
+        );
+        let mut big = LineTable::new("big.rs").unwrap();
+        for _ in 0..MAX_LINE_ROWS {
+            big.add_row(0, 0, 1, 0, true, false).unwrap();
+        }
+        assert!(matches!(
+            big.add_row(0, 0, 1, 0, true, false),
+            Err(ObjectError::BudgetExceeded { what: "MAX_LINE_ROWS", .. })
+        ));
     }
 }

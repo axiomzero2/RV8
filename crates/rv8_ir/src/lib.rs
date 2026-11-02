@@ -18,6 +18,7 @@
 //   all traversals are iterative.
 
 pub mod hir;
+pub mod diag_text;
 pub mod hetir;
 pub mod lir;
 pub mod lower_het;

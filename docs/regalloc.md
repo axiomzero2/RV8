@@ -41,3 +41,34 @@ Signatures: `pub fn allocate(lir: &LirFunction) -> Result<RegisterAllocation, Ba
 ## Known Limitations
 
 The wrap-sound rule reserves a wrapped value's lane to the end of the layout; interval splitting is the precise replacement. Call results carry no virtual registers, so consuming one in a live compute is rejected at the LIR boundary. The rewriter is the x86-64 emission stage; non-x86 targets consume `allocate_with` directly. The encoded flow objective is degenerate under surplus takes (the repair restores assignment semantics; the brute-force corpora are the exactness arbiters).
+
+# Addendum: Warm Start and Incremental/Region Re-Solve (RV8-140)
+
+## Abstract
+`rv8_backend::regalloc::warm` adds two accelerator paths over the ONE shared timeline network: a linear-scan warm start (`allocate_warm`) and an incremental/region re-solve (`allocate_incremental`). Both return the exact optimum or a documented, verified feasible answer that never costs more.
+
+## Formal Definitions
+```rust
+pub fn allocate_warm(plan: &Plan, lir: &LirFunction) -> Result<RegisterAllocation, BackendError>;
+pub fn allocate_incremental(plan: &Plan, lir: &LirFunction, prev: &RegisterAllocation,
+                            changed_values: &[ValueId]) -> Result<RegisterAllocation, BackendError>;
+pub(crate) fn linear_scan_assign(ranges, lanes, barriers) -> Vec<Option<usize>>;
+pub(crate) struct TimelineNetwork { g, enters, throughs, exits, chain_arcs, src_arcs, snk_arcs }
+```
+
+## Algorithm
+1. Warm start (design 7.4): the deterministic linear scan (def/value order, lowest eligible lane, pin- and barrier-aware) seeds the flow of value R on the shared network; each register's unit routes through its chord or idles.
+2. Incremental/region (design 7.2/7.3): the previous allocation is restored as the flow; only changed ranges (a region's values, for the region path) are re-routed; unchanged ranges keep their lanes unless their job arcs no longer exist.
+3. Both paths then run the optimality cleanse, the assignment repair, attribution, and the never-regress promotion: a residual cycle cannot reassign a chord between two register timelines (SRC/SNK arcs are saturated at flow value R), so the refined answer is compared to the exact cold solve under the corpus objective and the cheaper (tie: cold) result is published. Restore failures fall back to the cold solve.
+
+## Invariants
+1. `allocate_warm` cost equals the brute-force optimum on the full single-def corpus (24 seeds).
+2. `allocate_incremental` with an empty changed set is byte-identical to the cold allocation.
+3. Both paths are feasible (lane-private chords, barrier and pin rules), deterministic across runs, and never cost more than the exact optimum.
+4. All three solve paths build the identical network through one constructor.
+
+## Integration Points
+Depends on: `regalloc::solve` (network builder, repair, attribution), `regalloc::ranges` (barrier rule), `regalloc::network` (cleanse). Depended on by: the public `allocate_warm`/`allocate_incremental` entry points; the shipped `allocate`/`allocate_with` cold paths are unchanged.
+
+## Known Limitations
+Warm start is an exactness-preserving accelerator with a promotion check, not a faster optimum: its speed case (fewer augmenting paths on large functions) is future measurement work. The incremental path re-parses ranges from the current LIR; point shifts from inserted instructions are handled by the documented fallback, not by interval splitting.

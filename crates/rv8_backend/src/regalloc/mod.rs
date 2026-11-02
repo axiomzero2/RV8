@@ -21,6 +21,7 @@ pub mod network;
 pub mod ranges;
 pub mod rewrite;
 pub mod solve;
+pub mod warm;
 // The inline test module was orphaned (never declared), so its 426 lines of
 // brute-force and spill-path evidence never executed; wiring it back in is part
 // of the RV8-137 follow-up review.
@@ -29,6 +30,7 @@ mod tests;
 
 use crate::error::BackendError;
 use rv8_ir::lir::{LirFunction, RegClassId, RegisterAllocation};
+use rv8_ir::ValueId;
 
 pub use desc::{CostTable, Plan};
 pub use rewrite::{rewrite, FramePlan};
@@ -226,3 +228,127 @@ pub fn allocate(lir: &LirFunction) -> Result<RegisterAllocation, BackendError> {
 use rv8_ir::lir::RegId;
 use ranges::LiveRange;
 use solve::Outcome;
+
+/// CEP:WHAT: Allocates registers with the linear-scan warm start (RV8-140,
+/// design.md 7.4): the shared timeline network is seeded with the deterministic
+/// scan's assignment as an integral flow of value R, the cycle cleanse restores the
+/// optimality invariant, and the same repair and attribution as the cold solve run.
+/// CEP:WHY: STANDARDS 5.1 names the warm start; the corpora arbitrate that the
+/// optimum is identical to the cold path.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: see allocate_with; any restore failure deterministically falls back
+/// to the exact cold solve.
+/// CEP:ASSUMES: same LIR invariants as allocate_with.
+/// CEP:COST: scan O(ranges x registers) + cleanse (budgeted) + repair.
+/// CEP:EVIDENCE: warm_start_matches_cold_optimum_on_corpora.
+pub fn allocate_warm(plan: &Plan, lir: &LirFunction) -> Result<RegisterAllocation, BackendError> {
+    assemble_allocation(plan, lir, warm::solve_class_warm)
+}
+
+/// CEP:WHAT: Incremental/region re-solve (RV8-140, design.md 7.2/7.3): `prev` is a
+/// previous allocation for the same plan, `changed_values` names the values whose
+/// ranges moved (for the region path, the region's values). Unchanged ranges keep
+/// their lanes; changed ones re-route through the same deterministic repair; the
+/// cycle cleanse keeps the exactness story identical to the warm path. A restore
+/// failure (shifted points, moved barriers) falls back to the exact cold solve.
+/// CEP:WHY: Edit-compile loops pay for the changed set, not the function.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: see allocate_with; BudgetExceeded past the named budgets.
+/// CEP:ASSUMES: prev comes from this allocator on a compatible plan; values absent
+/// from prev are treated as changed.
+/// CEP:COST: O(ranges) restore + O(changed x span) repair + cleanse.
+/// CEP:EVIDENCE: incremental_resolve_is_identity_when_unchanged,
+///   incremental_resolve_keeps_feasibility_after_change.
+pub fn allocate_incremental(
+    plan: &Plan,
+    lir: &LirFunction,
+    prev: &RegisterAllocation,
+    changed_values: &[ValueId],
+) -> Result<RegisterAllocation, BackendError> {
+    let changed: std::collections::BTreeSet<u32> =
+        changed_values.iter().map(|v| v.0).collect();
+    assemble_allocation(plan, lir, |class_plan, class_ranges, points, barriers, costs| {
+        let prev_lanes: Vec<Option<usize>> = class_ranges
+            .iter()
+            .map(|r| {
+                prev.assignments
+                    .get(r.value.0 as usize)
+                    .copied()
+                    .flatten()
+                    .map(|rid| rid.0 as usize)
+            })
+            .collect();
+        let flags: Vec<bool> = class_ranges
+            .iter()
+            .map(|r| changed.contains(&r.value.0) || prev_lanes_is_none(prev, r.value.0))
+            .collect();
+        warm::solve_class_incremental(class_plan, class_ranges, points, barriers, costs, &prev_lanes, &flags)
+    })
+}
+
+/// CEP:WHAT: Shared assembly for the warm and incremental entry points: build
+/// ranges, solve each class through the injected solver, map outcomes onto the
+/// RegisterAllocation exactly as allocate_with does.
+/// CEP:WHY: One outcome-to-allocation mapping; three solve paths.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: see allocate_with.
+/// CEP:ASSUMES: the solver returns one outcome per class range.
+/// CEP:COST: dominated by the solver.
+/// CEP:EVIDENCE: the warm/incremental batches.
+fn assemble_allocation(
+    plan: &Plan,
+    lir: &LirFunction,
+    solve: impl Fn(
+        &desc::ClassPlan,
+        &[ranges::LiveRange],
+        u32,
+        &ranges::Barriers,
+        &desc::CostTable,
+    ) -> Result<Vec<Outcome>, BackendError>,
+) -> Result<RegisterAllocation, BackendError> {
+    let n = lir.values.len();
+    let (ranges, points) = ranges::build_ranges(plan, lir)?;
+    let mut outcomes: Vec<Outcome> = vec![Outcome::Spill; n];
+    let mut has_range = vec![false; n];
+    for r in &ranges {
+        has_range[r.value.0 as usize] = true;
+    }
+    let class_ids = [RegClassId::Gpr, RegClassId::Fpr];
+    for (class_idx, &class) in class_ids.iter().enumerate() {
+        if ranges.iter().any(|r| r.class == RegClassId::Vector) {
+            return Err(BackendError::UnsupportedPattern {
+                detail: "vector register class allocation not implemented".into(),
+            });
+        }
+        let class_plan = &plan.classes[class_idx];
+        let class_ranges: Vec<LiveRange> =
+            ranges.iter().copied().filter(|r| r.class == class).collect();
+        if class_ranges.is_empty() {
+            continue;
+        }
+        let barriers = ranges::build_barriers(plan, lir, points, class_idx);
+        let solved = solve(class_plan, &class_ranges, points, &barriers, &plan.costs)?;
+        for (range, outcome) in class_ranges.iter().zip(solved) {
+            outcomes[range.value.0 as usize] = outcome;
+        }
+    }
+    let mut alloc = RegisterAllocation::new(n);
+    let mut slot: u32 = 0;
+    for v in 0..n {
+        if !has_range[v] {
+            continue;
+        }
+        match outcomes[v] {
+            Outcome::Reg(ridx) => alloc.assignments[v] = Some(RegId(ridx as u32)),
+            Outcome::Spill => {
+                alloc.spill_slots[v] = Some(slot);
+                slot += 1;
+            }
+        }
+    }
+    Ok(alloc)
+}
+
+fn prev_lanes_is_none(prev: &RegisterAllocation, v: u32) -> bool {
+    matches!(prev.assignments.get(v as usize), None | Some(None))
+}

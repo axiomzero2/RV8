@@ -1,0 +1,4 @@
+PROVED  lane_lock: lane-private picks are always feasible
+PROVED  warm_seed_conservation(points=6,lanes=2)
+PROVED  promotion_matches_bruteforce
+ALL PROOFS PASSED

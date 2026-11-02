@@ -13,6 +13,7 @@
 // CEP:SECURITY: diagnostics queue is bounded; no environment, time, or address values enter output.
 
 pub mod arena;
+pub mod blake3;
 pub mod diag;
 pub mod hash;
 pub mod interner;
