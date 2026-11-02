@@ -1,8 +1,10 @@
 # CEP:FILE: .github/workflows/ci.yml
 # CEP:WHAT: The normative CI gate set from STANDARDS section 7: warnings-as-errors
 #   build, workspace tests, rustdoc with -D warnings, the CEP lint over
-#   crates/tools/tests, the end-to-end compile-and-run through the driver, and the
-#   reproducible-build comparison (release artifact built twice, byte-compared).
+#   crates/tools/tests, the end-to-end compile-and-run through the driver, the
+#   reproducible-build comparison (release artifact built twice, byte-compared),
+#   and the formal-verification gate (Lean 4: lake build, lake test, and a
+#   zero-sorry check over the RV8FV modules per CEP&CC chapter 54).
 # CEP:WHY: A merge is accepted only when every gate passes (STANDARDS 7); encoding the
 #   gates here makes them mechanical instead of aspirational.
 # CEP:CLASS: CEP-2
@@ -10,7 +12,8 @@
 # CEP:FAILURE: the workflow fails on the first red gate; GitHub reports the failing
 #   step. No gate is permitted to stay red without an open ticket under STANDARDS 7.
 # CEP:ASSUMES: ubuntu-latest with a stable Rust toolchain; no third-party crates, so
-#   no registry access is required beyond toolchain download.
+#   no registry access is required beyond toolchain download. The Lean toolchain is
+#   version-pinned in verification/lean/lean-toolchain (CEP&CC 54.5.1).
 # CEP:COST: cold; one workspace build per gate reuses the shared cargo cache.
 # CEP:EVIDENCE: every green run of this workflow is the evidence trail.
 name: ci
@@ -63,3 +66,17 @@ jobs:
           cargo clean -q -p rv8_driver
           cargo build -q --release -p rv8_driver
           cmp /tmp/rv8c_run_one build/release/rv8c
+
+      - name: Formal verification (Lean 4: build, test, zero-sorry gate)
+        run: |
+          curl -sSf https://elan.lean-lang.org/elan-init.sh -o /tmp/elan-init.sh
+          sh /tmp/elan-init.sh -y --default-toolchain none
+          export PATH="$HOME/.elan/bin:$PATH"
+          cd verification/lean
+          lake build RV8FV rv8fvtest
+          lake test
+          if grep -rn "sorry" RV8FV RV8FV.lean SmokeMain.lean; then
+            echo "FV-0 violation: sorry found (CEP&CC 54.3.1)"
+            exit 1
+          fi
+          echo "formal verification: zero sorry, all theorems compiled, smoke tests passed"
