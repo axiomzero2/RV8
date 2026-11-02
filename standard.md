@@ -13114,3 +13114,313 @@ If your compiler allocates a string for every token, you have failed.
 If your build system relies on file timestamps, you have failed.
 If your multi-threaded passes use mutexes, you have failed.
 If your 64-core build server is only using 40% of its CPU, you have failed.
+---
+
+# 54. Formal Verification and Theorem Proving (FV)
+This chapter extends CEP&CC for codebases that use interactive theorem provers (Lean 4, Isabelle/HOL, Coq, HOL4, HOL Light) or automated SMT solvers (Z3, CVC5) to verify code, models, or compiler transformations.
+
+Formal verification is not a decoration. It is not a "mathematical comment." It is a machine-checked proof that a system satisfies its specification. If a proof script contains `sorry`, `Admitted`, or unproven axioms, it is not a proof; it is a placeholder. If a formal model simplifies away the hard parts of the code (memory aliasing, integer overflow, concurrency) without a refinement proof, it is not a model of the code; it is a model of a toy problem.
+
+For FV, the following are first-class correctness requirements:
+1. machine-checked, complete proofs (zero `sorry`/`Admitted`),
+2. exact model fidelity (no unproven simplifications),
+3. verified extraction or verified refinement (the model and the code must match),
+4. reproducible proof scripts,
+5. explicit handling of solver timeouts and axioms.
+
+---
+
+## 54.1 FV Prime Law
+The FV prime law is:
+> A proof with `sorry`, `Admitted`, or unproven axioms is not a proof. It is a lie.
+> A model that simplifies away operational reality without a refinement proof is not a model. It is a fiction.
+> The formal model and the executable code must be mathematically linked. You cannot verify a Lean model and then hand-write a C++ implementation and claim it is verified.
+> Automated solver scripts must be deterministic, bounded, and reproducible.
+
+Violations of the FV prime law are Severity 0.
+
+---
+
+## 54.2 FV Conformance Classes
+FV defines three component classes.
+
+### 54.2.1 FV-0: Machine-Checked Critical Proofs
+FV-0 applies to properties that are mathematically proven and machine-checked.
+FV-0 includes:
+- security-critical cryptographic implementations,
+- safety-critical control algorithms,
+- compiler transformation equivalence proofs,
+- memory-safety proofs for unsafe FFI boundaries,
+- verified extraction from Lean/Coq to C++/Rust.
+
+FV-0 requirements:
+- Zero `sorry` (Lean), `Admitted` (Coq/Isabelle), or `assume` (HOL).
+- Zero unproven axioms unless explicitly declared as target-hardware axioms (e.g., `axiom hardware_memory_model : ...`) and justified.
+- The proof script must compile and pass in CI on every commit.
+- The model must exactly match the operational semantics of the code.
+
+### 54.2.2 FV-1: Verified Models and Partial Proofs
+FV-1 applies to models that are verified but may rely on unverified glue code, or proofs that cover only a subset of the state space.
+FV-1 includes:
+- abstract state machine models,
+- protocol verification (e.g., distributed consensus),
+- bounded model checking results.
+
+FV-1 requirements:
+- The core model must be `sorry`-free.
+- Any gaps between the model and the code must be explicitly documented as `CEP:FV-REFINEMENT` gaps and bridged by runtime checks or manual review.
+
+### 54.2.3 FV-2: Proof Tooling and Tactics
+FV-2 applies to custom tactics, decision procedures, and proof orchestration scripts.
+FV-2 must be deterministic and must not introduce unsoundness into the prover kernel.
+
+---
+
+## 54.3 The "No Sorry" and "No Admitted" Mandate
+Interactive theorem provers allow you to skip proof steps. CEP&CC bans this in FV-0.
+
+### 54.3.1 Lean 4 Policy
+- **Banned:** `sorry`, `panic!`, `unsafe` (unless isolated and proven), `axiom` (unless representing a hardware/OS axiom).
+- **Required:** Every theorem must be proven. If a proof is too hard, the theorem must be weakened, or the component must be downgraded to FV-1.
+- **Extermination:** A Lean file containing `sorry` in an FV-0 module is **exterminated**.
+
+### 54.3.2 Isabelle/HOL and Coq Policy
+- **Banned:** `Admitted` (Coq), `sorry` (Isabelle), `skip` (HOL4).
+- **Required:** All proofs must be completed with `Qed`, `done`, or equivalent.
+- **Extermination:** An Isabelle theory containing `Admitted` in an FV-0 module is **exterminated**.
+
+### 54.3.3 The Axiom Exception
+Axioms are only allowed if they represent physical or hardware reality that cannot be proven in software.
+Example of allowed axiom:
+```lean
+-- Axiom: The hardware memory model is sequentially consistent for this region.
+axiom hw_seq_cst (addr : UInt64) : ...
+```
+Example of banned axiom:
+```lean
+-- BANNED: Axiom: The array bounds check passes. (This is a software property, not a hardware axiom).
+axiom bounds_check_passes : ...
+```
+
+---
+
+## 54.4 Model Fidelity and the "No Simplification" Rule
+The most common failure in formal verification is verifying a simplified model while deploying a complex implementation.
+
+### 54.4.1 The Fidelity Mandate
+The formal model must include all operational details that affect the verified property.
+- If you verify memory safety, the model **must** include memory allocation, pointers, and aliasing. You cannot model memory as a mathematical set and claim the C++ code is memory-safe.
+- If you verify integer arithmetic, the model **must** include overflow, underflow, and wrapping semantics. You cannot model integers as $\mathbb{Z}$ (unbounded mathematical integers) and claim the `uint32_t` code is correct.
+- If you verify concurrency, the model **must** include the memory consistency model (e.g., C++26 memory model, TSO, ARMv8).
+
+### 54.4.2 The Refinement Proof Requirement
+If the model *must* simplify a detail for tractability, you must provide a **refinement proof** or a **runtime bridge**.
+- **Refinement Proof:** A machine-checked proof that the concrete C++/Rust implementation refines the abstract Lean/Isabelle model.
+- **Runtime Bridge:** A verified wrapper in the implementation language that checks the abstract preconditions before calling the concrete code.
+
+Bad:
+```lean
+-- Model: Unbounded integers.
+def add (a b : Int) : Int := a + b
+-- C++ Code:
+uint32_t add(uint32_t a, uint32_t b) { return a + b; } // OVERFLOW NOT MODELED!
+```
+
+Good:
+```lean
+-- Model: Bounded 32-bit integers with explicit overflow.
+def add (a b : UInt32) : Option UInt32 := ...
+-- C++ Code:
+std::expected<uint32_t, Error> add(uint32_t a, uint32_t b) {
+  if (b > UINT32_MAX - a) return std::unexpected(Error::overflow);
+  return a + b;
+}
+```
+
+---
+
+## 54.5 Tool-Specific Policies
+
+### 54.5.1 Lean 4
+- **Extraction:** If using `Lean.Compiler.Export` or similar to extract Lean code to C++, the extraction process must be proven correct, or the extracted code must be wrapped in a verified FFI boundary.
+- **Dependencies:** All Lean dependencies must be version-pinned. A proof that relies on a mutable `git` dependency is not reproducible.
+- **CI Gate:** `lake build` and `lake test` must pass in CI. Proof scripts must not rely on local environment variables.
+
+### 54.5.2 Z3 and SMT Solvers
+- **Bounded Verification:** SMT solvers are not theorem provers; they are semi-decision procedures. A timeout is not a proof of falsehood.
+- **Required:** Every Z3 script must document its timeout limit. If the solver times out, the property is **unproven**, not false.
+- **Quantifiers:** Universal quantifiers (`forall`) in SMT can cause infinite loops in the solver. Use quantifier instantiation patterns (`:pattern`) explicitly.
+- **Extermination:** A Z3 script that relies on `:timeout 0` (infinite) or hides a timeout failure is **exterminated**.
+
+### 54.5.3 Isabelle/HOL and HOL4
+- **Code Generation:** If using Isabelle's `code_gen` to generate SML, OCaml, or Haskell, the generated code must be reviewed for performance and memory safety. The generator is not magic.
+- **L4v/seL4 Style:** If verifying an OS or kernel, the C code must be annotated with `cspec` and `dspec` contracts, and the refinement chain must be unbroken.
+
+---
+
+## 54.6 Code-to-Model Refinement (Bridging the Gap)
+You cannot verify a Lean model and then hand-write a C++ implementation. The link must be formal.
+
+### 54.6.1 Verified Extraction
+If the code is extracted from the prover (e.g., Lean to C++, Coq to OCaml):
+- The extraction mechanism must be trusted or proven.
+- The target language's runtime (e.g., C++ `std::vector`, garbage collection in OCaml) must be modeled or bounded.
+
+### 54.6.2 Verified Implementation (Refinement)
+If the code is written in C++/Rust and the model is written in Lean/Isabelle:
+- The C++/Rust code must be annotated with contracts (e.g., using Frama-C, Verus, or Prusti).
+- A refinement proof must show that the C++ state transitions simulate the Lean state transitions.
+- **Extermination:** Claiming a C++ function is "verified by Lean" when the Lean file only verifies a mathematical algorithm and the C++ code contains manual memory management is **exterminated**.
+
+---
+
+## 54.7 FV Comment Standard
+Formal verification artifacts must include specific comment fields.
+
+### 54.7.1 Required FV Fields
+```text
+// CEP:FV-CLASS:
+// CEP:FV-PROVER:
+// CEP:FV-SCRIPT:
+// CEP:FV-SORRY-COUNT:
+// CEP:FV-REFINEMENT:
+// CEP:FV-AXIOMS:
+```
+
+### 54.7.2 FV Comment Example: Lean Theorem
+```lean
+/-
+CEP:FILE: src/crypto/aes_verify.lean
+CEP:WHAT: Proves that the AES implementation has no secret-dependent branches.
+CEP:WHY: Constant-time execution is required for security.
+CEP:CLASS: FV-0
+CEP:STATUS: complete
+CEP:FAILURE: Proof fails if the implementation introduces data-dependent control flow.
+CEP:ASSUMES: The hardware executes instructions in constant time (no cache timing modeled).
+CEP:FV-CLASS: FV-0
+CEP:FV-PROVER: Lean 4
+CEP:FV-SCRIPT: src/crypto/aes_verify.lean
+CEP:FV-SORRY-COUNT: 0
+CEP:FV-REFINEMENT: C++ implementation uses verified lookup tables; refinement proven in aes_refinement.lean.
+CEP:FV-AXIOMS: hardware_constant_time (justified by target manual).
+-/
+```
+
+### 54.7.3 FV Comment Example: Z3 Script
+```python
+# CEP:FILE: tools/verify_bounds.py
+# CEP:WHAT: Bounded verification of array index calculation.
+# CEP:WHY: Proves no overflow occurs for inputs < 1024.
+# CEP:CLASS: FV-1
+# CEP:FV-PROVER: Z3
+# CEP:FV-SCRIPT: tools/verify_bounds.py
+# CEP:FV-SORRY-COUNT: N/A (SMT)
+# CEP:FV-REFINEMENT: Bounded to 1024; unbounded proof requires induction in Lean.
+```
+
+---
+
+## 54.8 FV Review Checklist
+A formal verification change is compliant only if:
+- [ ] Zero `sorry` / `Admitted` in FV-0.
+- [ ] Proof scripts compile and pass in CI.
+- [ ] No unproven axioms (unless hardware/OS axioms).
+- [ ] Model fidelity matches operational reality (no unproven simplifications).
+- [ ] Refinement proof or runtime bridge exists between model and code.
+- [ ] SMT timeouts are documented and bounded.
+- [ ] Dependencies are version-pinned and reproducible.
+- [ ] Extraction mechanisms are trusted or verified.
+
+---
+
+## 54.9 FV Extermination Examples
+
+### Example 1: The `sorry` in Lean
+**Violation:**
+```lean
+theorem aes_constant_time : ... := by
+  sorry -- TODO: finish proof later
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: FV-0 module contains `sorry`. The proof is incomplete.
+Rule: CEP&CC 54.3.1
+Action: Complete the proof or downgrade the component to FV-1 and document the gap.
+```
+
+### Example 2: The Simplified Model (Unbounded Integers)
+**Violation:**
+```lean
+-- Lean Model
+def checksum (data : List Int) : Int := data.foldl (· + ·) 0
+
+-- C++ Code
+uint32_t checksum(uint32_t* data, size_t len) {
+  uint32_t sum = 0;
+  for (size_t i = 0; i < len; i++) sum += data[i]; // OVERFLOW!
+  return sum;
+}
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Model uses unbounded integers (Int); code uses bounded uint32_t. The model simplifies away overflow. No refinement proof exists.
+Rule: CEP&CC 54.4.1
+Action: Rewrite the Lean model using UInt32 and explicit wrapping semantics, or provide a refinement proof.
+```
+
+### Example 3: Z3 Timeout Hidden
+**Violation:**
+```python
+s = z3.Solver()
+s.set("timeout", 0) # Infinite timeout
+s.add(...)
+if s.check() == z3.sat:
+    print("Verified")
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: SMT solver timeout is set to infinite. If the solver hangs, the CI hangs. If it times out in a constrained environment, the verification is silently skipped.
+Rule: CEP&CC 54.5.2
+Action: Set a strict timeout (e.g., 10 seconds). If it times out, the build must fail.
+```
+
+### Example 4: Isabelle `Admitted`
+**Violation:**
+```isabelle
+lemma security_property:
+  shows "valid_state s --> secure s"
+  oops -- Admitted
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: FV-0 theory contains `oops` (Admitted). The property is unproven.
+Rule: CEP&CC 54.3.2
+Action: Complete the proof.
+```
+
+### Example 5: Unverified Hand-Written C++ After Lean Extraction
+**Violation:**
+The team writes a beautiful, verified Lean model of a scheduler. They then manually rewrite it in C++ for performance, claiming "it's the same algorithm, so it's verified."
+**Response:**
+```text
+EXTERMINATE
+Reason: The C++ code is not the extracted code, and no refinement proof links the C++ memory model to the Lean model. The verification is broken.
+Rule: CEP&CC 54.6
+Action: Use verified extraction, or write a refinement proof linking the C++ code to the Lean model.
+```
+
+---
+
+## 54.10 Final FV Clause
+> Mathematics does not care about your intentions.
+> The prover does not care about your comments.
+> If there is a `sorry`, you have not proven it.
+> If the model ignores memory, you have not verified the code.
+> If the C++ code is not linked to the model, you have not verified the system.
+
+Formal verification is the highest standard of correctness. It is not a place for hand-waving.
+Prove it completely. Prove it faithfully. Or do not claim it is verified.
