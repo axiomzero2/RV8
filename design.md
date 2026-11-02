@@ -3016,3 +3016,513 @@ Every single commit to the compiler's source code triggers the Gauntlet.
 4. **The Fuzzing Swarm:** Dedicates a cluster of 1,000 CPU cores to run the grammar-aware fuzzer for 24 hours. If a single crash is found, the CI fails, and the minimized test case is automatically attached to the commit that introduced the regression.
 
 This is not just testing. This is an adversarial, continuous, mathematical proof of correctness. The compiler is forged in a crucible of millions of failures, ensuring that when it finally ships, it is unbreakable.
+
+
+# JIT Runtime & Adaptive Compilation: Complete Technical Design
+
+## 1. Region-Based Partial Deoptimization on Sea of Nodes
+
+### 1.1 The Core Paradigm: Granular Deoptimization
+Traditional deoptimization discards the entire function's optimized state and restarts from the beginning. This is catastrophic for performance when only a small region (e.g., a single loop or branch) has violated its assumptions.
+
+**Region-Based Partial Deoptimization** operates on the Sea of Nodes by treating the IR as a collection of **independent, optimizable regions** separated by **deoptimization boundaries**.
+
+**Mathematical Model:**
+Let $N$ be the set of nodes in the Sea of Nodes. A **Region** $R_i \subseteq N$ is a connected subgraph with the following properties:
+- **Entry Points:** A set of nodes $E(R_i)$ where control can enter the region
+- **Exit Points:** A set of nodes $X(R_i)$ where control leaves the region
+- **Guards:** A set of guard nodes $G(R_i) \subseteq R_i$ that check runtime assumptions
+- **Deoptimization Map:** A function $\delta: G(R_i) \rightarrow \text{State}$ that maps each guard to the unoptimized state it should restore
+
+When a guard $g \in G(R_i)$ fails, only region $R_i$ deoptimizes. The rest of the function continues executing in its optimized form.
+
+### 1.2 Region Construction Algorithm
+**Phase 1: Guard Placement**
+During AOT compilation, the compiler identifies "speculative opportunities" (e.g., type-specialized paths, devirtualized calls, eliminated bounds checks). At each opportunity, it inserts a **Guard Node** into the Sea of Nodes:
+```
+GuardNode {
+    condition: Node,           // The runtime check
+    deopt_state: DeoptState,   // The unoptimized state to restore
+    region_id: RegionId,       // Which region this guard belongs to
+    priority: u32              // How likely this guard is to fail
+}
+```
+
+**Phase 2: Region Partitioning**
+The compiler partitions the Sea of Nodes into regions using a **dominator-tree-based algorithm**:
+1. Compute the dominator tree of the control flow graph
+2. For each guard node $g$, find its **immediate dominator** $idom(g)$
+3. The region $R_g$ consists of all nodes dominated by $idom(g)$ until the next guard or function exit
+4. Merge small regions (< 10 nodes) to reduce deoptimization overhead
+5. Split large regions (> 1000 nodes) to improve deoptimization granularity
+
+**Phase 3: Deoptimization State Extraction**
+For each region $R_i$, the compiler computes a **Deoptimization State** $\delta(R_i)$:
+- **Live Values:** The set of values that are live at the region's entry points
+- **Materialization Points:** For each live value, the exact location (register, stack slot, or constant) in the unoptimized code
+- **Reconstruction Instructions:** A sequence of instructions to rebuild the unoptimized state from the optimized state
+
+This state is encoded as a **compact bitstream** (typically < 100 bytes per region) and stored in a **Deoptimization Metadata Table** indexed by region ID.
+
+### 1.3 Partial Deoptimization Execution
+When a guard fails at runtime:
+1. The guard triggers a **trap** (e.g., `ud2` on x86, `brk` on ARM)
+2. The runtime's **Deoptimization Handler** reads the trap's instruction pointer
+3. It looks up the region ID and deoptimization state from the metadata table
+4. It **partially reconstructs** the unoptimized state:
+   - Copies live values from optimized registers/stack to unoptimized locations
+   - Materializes any scalar-replaced objects (using PEA metadata)
+   - Restores the control flow state (which basic block, which instruction)
+5. It **patches the call site** to redirect future executions to the unoptimized path
+6. Execution resumes in the unoptimized code **at the exact point of failure**
+
+**Key Insight:** Only the failing region's state is reconstructed. The rest of the function's optimized state remains intact. This reduces deoptimization overhead from $O(N)$ to $O(|R_i|)$ where $|R_i|$ is the size of the failing region.
+
+### 1.4 Integration with Sea of Nodes
+The Sea of Nodes IR is extended with:
+- **Region Nodes:** Meta-nodes that mark region boundaries
+- **Guard Nodes:** Conditional nodes that check assumptions and trigger deoptimization
+- **Deoptimization Edges:** Control-flow edges that connect guards to deoptimization stubs
+- **Materialization Nodes:** Nodes that reconstruct scalar-replaced objects on deoptimization
+
+The borrow checker's liveness bitsets are reused to compute the deoptimization state, ensuring zero redundant analysis.
+
+---
+
+## 2. Lowest Overhead On-Stack Replacement (OSR)
+
+### 2.1 The OSR Challenge
+On-Stack Replacement allows jumping from unoptimized code into the middle of optimized code (e.g., entering a hot loop that has already been JIT-compiled). The challenge is minimizing the cost of this transition, which traditionally involves:
+- Stopping the world
+- Walking the stack
+- Reconstructing the entire function's state
+- Resuming execution
+
+### 2.2 The Zero-Copy OSR Design
+Our OSR achieves **sub-microsecond** transition time through three key innovations:
+
+**Innovation 1: Pre-Computed OSR Entry Points**
+During JIT compilation, the compiler generates **specialized OSR entry points** for each loop header and function entry. These entry points are **not** generic deoptimization stubs; they are **hand-optimized assembly sequences** that:
+- Accept the unoptimized state as input (in specific registers)
+- Perform minimal state transformation (register moves, stack adjustments)
+- Jump directly into the optimized code at the exact instruction
+
+The OSR entry point is generated by running the **DP-on-DAG instruction selector** on a "state transformation DAG" that maps unoptimized locations to optimized locations.
+
+**Innovation 2: Shadow Stack Frames**
+The runtime maintains a **shadow stack** that mirrors the call stack but stores **OSR metadata**:
+- For each stack frame, the shadow stack stores a pointer to the OSR entry point (if one exists)
+- The shadow stack is updated on every function call/return using **instrumented prologues/epilogues**
+- The overhead is a single pointer write per call (amortized to < 1 cycle)
+
+When OSR is triggered:
+1. The runtime reads the shadow stack to find the OSR entry point
+2. It jumps directly to the entry point (no stack walking)
+3. The entry point performs the state transformation and resumes execution
+
+**Innovation 3: Lazy State Materialization**
+Not all live values need to be materialized immediately. The OSR entry point uses **lazy materialization**:
+- Values that are immediately used are materialized eagerly
+- Values that are not used for several instructions are materialized lazily (on first use)
+- This is implemented by inserting **materialization guards** into the optimized code that check if a value has been materialized
+
+### 2.3 OSR Trigger Mechanism
+OSR is triggered by **hotness counters** embedded in the unoptimized code:
+- Each loop header has a **back-edge counter** (a 32-bit integer in memory)
+- Each function entry has an **invocation counter**
+- When a counter exceeds a threshold (e.g., 10,000 for loops, 1,000 for functions), it triggers OSR
+
+The trigger mechanism is **asynchronous**:
+1. The counter overflow triggers a **signal handler** (or a **polling check** in the unoptimized code)
+2. The signal handler submits a **JIT compilation request** to the background compiler thread
+3. Once JIT compilation completes, the runtime **patches the unoptimized code** to jump to the OSR entry point
+4. The next time the loop is executed, it enters the optimized code via OSR
+
+### 2.4 OSR State Reconstruction
+The state reconstruction is performed by the **OSR Entry Point Generator**, which:
+1. Takes the unoptimized stack frame layout and the optimized stack frame layout as input
+2. Computes a **minimal set of moves** to transform the unoptimized state into the optimized state
+3. Uses the **MCF register allocator** to assign physical registers to the moves
+4. Emits the moves as a sequence of machine instructions
+
+The generated OSR entry point is **tail-call optimized** to jump directly into the optimized code without returning to the caller.
+
+### 2.5 OSR Performance Characteristics
+- **Trigger overhead:** < 1 cycle (counter increment)
+- **OSR transition time:** 100-500 nanoseconds (depending on state complexity)
+- **Memory overhead:** 8 bytes per stack frame (shadow stack pointer)
+- **Code size overhead:** ~50 bytes per OSR entry point
+
+---
+
+## 3. The Runtime Code Emitter
+
+### 3.1 Architecture Overview
+The Runtime Code Emitter is the JIT backend that generates machine code directly into executable memory. It operates on the **LIR (Low-level IR)** produced by the middle-end and emits **Machine IR** that is immediately executable.
+
+**Key Components:**
+1. **Executable Memory Manager:** Allocates and manages W^X-compliant memory pages
+2. **Instruction Encoder:** Converts Machine IR into binary machine code
+3. **Relocation Resolver:** Patches addresses and offsets into the emitted code
+4. **Cache Coherency Manager:** Ensures the instruction cache is synchronized with the data cache
+5. **Code Patching Engine:** Allows runtime modification of emitted code (for deoptimization, OSR, etc.)
+
+### 3.2 Executable Memory Manager
+**W^X Compliance:**
+Modern OSes enforce that memory pages cannot be both writable and executable simultaneously. The memory manager uses a **three-phase allocation protocol**:
+1. **Allocate:** Request memory with `PROT_READ | PROT_WRITE` (writable, not executable)
+2. **Emit:** Write machine code into the memory
+3. **Finalize:** Change permissions to `PROT_READ | PROT_EXEC` (executable, not writable)
+
+**Memory Layout:**
+The emitter uses a **bump allocator** within each memory page:
+- Each page is 4KB (or 2MB for large pages)
+- Code is emitted sequentially, advancing a pointer
+- When a page is full, a new page is allocated
+- Pages are linked in a **code segment list** for efficient deallocation
+
+**Memory Reclamation:**
+When JIT-compiled code is no longer needed (e.g., after deoptimization), the memory manager:
+1. Marks the code as "cold"
+2. After a grace period (e.g., 10 seconds), reclaims the memory
+3. Uses **reference counting** to ensure no live pointers exist
+
+### 3.3 Instruction Encoder
+The instruction encoder converts Machine IR into binary machine code. It is **target-specific** and implements the encoding rules for each ISA (x86-64, ARM64, RISC-V, etc.).
+
+**Encoding Process:**
+1. **Instruction Selection:** The DP-on-DAG selector has already chosen the optimal instruction sequence
+2. **Operand Encoding:** For each instruction, the encoder:
+   - Encodes the opcode (e.g., `0x01` for `add` on x86)
+   - Encodes the register operands (e.g., `rax` = 0, `rbx` = 3)
+   - Encodes immediate values (e.g., `42` = `0x2a`)
+   - Encodes memory operands (e.g., `[rbx + rcx*4 + 16]`)
+3. **Relocation Generation:** For external references (e.g., calls to other functions), the encoder generates **relocation records** that will be resolved later
+
+**Max-Perf Encoding:**
+The encoder uses **pre-computed encoding tables** to avoid branching:
+- Each opcode has a fixed encoding template
+- Operand types are encoded using lookup tables
+- The encoder processes instructions in batches of 16 for SIMD optimization
+
+### 3.4 Relocation Resolver
+Relocations are patches that must be applied to the emitted code when final addresses are known.
+
+**Relocation Types:**
+- **Internal Relocations:** References within the same JIT-compiled function (e.g., loop back-edges)
+- **External Relocations:** References to AOT-compiled code or runtime functions
+- **Data Relocations:** References to global variables or constants
+
+**Resolution Process:**
+1. **Internal Relocations:** Resolved immediately during emission (the target address is known)
+2. **External Relocations:** Resolved lazily on first use (using a **Global Offset Table** or **Procedure Linkage Table**)
+3. **Data Relocations:** Resolved during finalization (when the data section is allocated)
+
+### 3.5 Cache Coherency Manager
+After emitting code, the instruction cache (icache) must be synchronized with the data cache (dcache).
+
+**Coherency Protocol:**
+1. **Flush Dcache:** Ensure all written data is visible to the icache
+2. **Invalidate Icache:** Clear any stale instructions from the icache
+3. **Barrier:** Insert a memory barrier to ensure ordering
+
+**Target-Specific Implementation:**
+- **x86-64:** The icache is coherent with the dcache, so no explicit flush is needed (but a `mfence` is recommended)
+- **ARM64:** Requires explicit `dc cvau` (data cache clean) and `ic ivau` (instruction cache invalidate) instructions
+- **RISC-V:** Requires `fence.i` instruction
+
+### 3.6 Code Patching Engine
+The code patching engine allows runtime modification of emitted code. This is used for:
+- **Deoptimization:** Patching a call site to redirect to a deoptimization stub
+- **OSR:** Patching a loop header to redirect to an OSR entry point
+- **Inline Cache Updates:** Patching a call site to redirect to a specialized version
+
+**Patching Protocol:**
+1. **Suspend Execution:** Ensure no thread is executing the code being patched (using **safepoints** or **thread suspension**)
+2. **Make Writable:** Temporarily change the memory page to writable
+3. **Patch:** Write the new instructions
+4. **Flush Cache:** Invalidate the icache for the patched region
+5. **Make Executable:** Restore the memory page to executable
+6. **Resume Execution:** Allow threads to continue
+
+**Atomic Patching:**
+For small patches (≤ 8 bytes), the emitter uses **atomic writes** to ensure that no thread sees a partially-patched instruction. For larger patches, it uses **thread suspension** to ensure safety.
+
+---
+
+## 4. AOT to JIT Transition via Incremental Compilation
+
+### 4.1 The Core Insight: Don't Recompile, Retune
+The key innovation is that the JIT does **not** recompile from scratch. Instead, it uses the existing AOT infrastructure (Autotuner, Sea of Nodes, PEA) and applies **incremental changes** based on runtime profile data.
+
+**The Transition Pipeline:**
+1. **AOT Compilation:** The compiler generates optimized AOT code using the Autotuner's ML-guided search
+2. **Runtime Profiling:** The AOT code collects profile data (type frequencies, branch outcomes, call targets)
+3. **Profile-Driven Retuning:** When the profile data diverges significantly from the AOT assumptions, the JIT:
+   - Loads the cached AOT IR from the CAS
+   - Applies **incremental transformations** based on the new profile data
+   - Re-runs the Autotuner with the updated profile as input
+   - Emits the updated code via the Runtime Code Emitter
+4. **OSR Transition:** The runtime transitions to the new code via OSR
+
+### 4.2 Incremental Autotuner Updates
+The Autotuner's 4-tier funnel is reused, but with **incremental evaluation**:
+
+**Tier 0 (Surrogate Inference):**
+- The CGT (Conditional Graph Transformer) is re-run with the updated profile data
+- It predicts which passes will be most beneficial given the new profile
+- The bottom 90% of candidates are discarded
+
+**Tier 1 (Partial IR Execution):**
+- Only the **affected regions** are re-evaluated (not the entire function)
+- The actual IR delta is compared to the predicted delta
+- If the deviation is too large, the candidate is discarded
+
+**Tier 2 (Cycle-Accurate Simulation):**
+- The simulator re-runs only the affected regions
+- It uses the existing simulation results as a baseline and applies deltas
+
+**Tier 3 (Silicon Validation):**
+- Only the top contenders are validated on silicon
+- The validation is **incremental**: it measures the performance delta, not the absolute performance
+
+### 4.3 CAS-Based Incremental Compilation
+The Content-Addressable Storage (CAS) is extended to cache **profile-specific configurations**:
+
+**Cache Key:**
+```
+CompositeHash {
+    function_lir_hash: Hash,
+    target_hardware_fingerprint: Hash,
+    profile_hash: Hash,           // NEW: Hash of the runtime profile
+    compiler_version: Hash
+}
+```
+
+**Cache Value:**
+```
+TunedConfiguration {
+    plackett_luce_logits: Vec<f32>,
+    iteration_counts: Vec<u32>,
+    factor_values: Vec<f32>,
+    deoptimization_metadata: DeoptMetadata,
+    osr_entry_points: Vec<OSREntryPoint>
+}
+```
+
+**Cache Lookup:**
+When a function needs to be JIT-compiled:
+1. Compute the composite hash (including the current profile)
+2. Look up the hash in the CAS
+3. If found, load the cached configuration and emit the code immediately
+4. If not found, run the incremental Autotuner and cache the result
+
+### 4.4 Zero-Waste Transition
+The incremental compilation ensures that **nothing is wasted**:
+- The AOT code's optimization results are reused as a baseline
+- The Autotuner's ML model is fine-tuned, not retrained
+- The CAS cache is extended, not replaced
+- The runtime profile data is accumulated, not discarded
+
+This results in **sub-second** JIT compilation times for most functions, as the heavy lifting (Autotuner search, IR analysis) has already been done during AOT compilation.
+
+---
+
+## 5. JIT-Specific Optimizations: Complete Catalog
+
+### 5.1 Inline Caching
+**Monomorphic Inline Cache (MIC):**
+- Caches a single type at a call site
+- If the type matches, execution continues without a call
+- If the type mismatches, transitions to polymorphic or megamorphic
+
+**Polymorphic Inline Cache (PIC):**
+- Caches up to 4 types at a call site
+- Uses a linear search or binary search to find the matching type
+- If the type is not found, transitions to megamorphic
+
+**Megamorphic Dispatch:**
+- Falls back to a global hash table lookup
+- Or generates a specialized dispatch stub via JIT
+
+**Implementation:**
+The inline cache is embedded directly in the machine code as a sequence of compare-and-branch instructions. The cache is updated by **patching the code** when a new type is encountered.
+
+### 5.2 Speculative Optimization
+**Type Specialization:**
+- The JIT speculates that a variable has a specific type (e.g., `i32`)
+- It generates optimized code for that type
+- It inserts a guard to check the type at runtime
+- If the guard fails, it deoptimizes to the generic code
+
+**Devirtualization:**
+- The JIT speculates that a virtual call resolves to a specific method
+- It inlines the method directly
+- It inserts a guard to check the method's identity
+- If the guard fails, it deoptimizes to the virtual call
+
+**Bounds Check Elimination:**
+- The JIT speculates that an array index is within bounds
+- It removes the bounds check
+- It inserts a guard to check the bounds at runtime
+- If the guard fails, it deoptimizes to the checked code
+
+### 5.3 Guarded Optimizations
+**Guard Insertion:**
+- For each speculative optimization, the JIT inserts a guard node
+- The guard checks the assumption (e.g., type, bounds, method identity)
+- If the guard fails, it triggers deoptimization
+
+**Guard Elision:**
+- If the profile data shows that a guard always succeeds, the JIT may elide the guard
+- This is done by the Autotuner, which prioritizes guard elision for hot paths
+
+**Guard Coalescing:**
+- Multiple guards checking the same assumption are coalesced into a single guard
+- This reduces the overhead of guard checking
+
+### 5.4 Runtime Constant Propagation
+**Profile-Guided Constants:**
+- If the profile data shows that a variable is always a specific constant, the JIT treats it as a constant
+- It propagates the constant through the IR
+- It eliminates redundant computations
+
+**Lazy Constant Folding:**
+- Constants are folded lazily, only when they are used
+- This avoids folding constants that are never used
+
+### 5.5 Profile-Guided Inlining
+**Hot Call Site Inlining:**
+- The JIT inlines functions that are called frequently
+- It uses the profile data to determine which call sites are hot
+
+**Cold Call Site Outlining:**
+- The JIT outlines functions that are called infrequently
+- This reduces code size and improves icache locality
+
+**Speculative Inlining:**
+- The JIT speculatively inlines a function based on the call site's type profile
+- If the type profile changes, it deoptimizes and re-inlines
+
+### 5.6 Dynamic Class Hierarchy Analysis (CHA)
+**Class Hierarchy Tracking:**
+- The runtime tracks the class hierarchy dynamically
+- When a new class is loaded, it updates the hierarchy
+
+**Devirtualization via CHA:**
+- If CHA shows that a virtual method has only one implementation, the JIT devirtualizes the call
+- If a new implementation is loaded, the JIT deoptimizes and re-compiles
+
+### 5.7 Runtime Loop Optimizations
+**Profile-Guided Loop Unrolling:**
+- The JIT unrolls loops based on the profile data (e.g., trip count, iteration variability)
+- It uses the Autotuner to determine the optimal unroll factor
+
+**Runtime Loop Tiling:**
+- The JIT tiles loops based on the profile data (e.g., cache miss rates, memory access patterns)
+- It uses the Autotuner to determine the optimal tile size
+
+**Adaptive Loop Vectorization:**
+- The JIT vectorizes loops based on the profile data (e.g., data alignment, stride)
+- It uses the Autotuner to determine the optimal vector width
+
+### 5.8 Dynamic Register Allocation
+**Profile-Guided Register Allocation:**
+- The MCF register allocator uses profile data to determine which values are most frequently used
+- It assigns registers to the most frequently used values
+- It spills the least frequently used values
+
+**Runtime Register Pressure Relief:**
+- If the register pressure is too high, the JIT dynamically re-allocates registers
+- It uses the MCF solver to find a better allocation
+
+### 5.9 Runtime Instruction Selection
+**Profile-Guided Instruction Selection:**
+- The DP-on-DAG instruction selector uses profile data to determine which instruction patterns are most beneficial
+- It selects patterns that minimize latency for the actual data patterns
+
+**Adaptive Addressing Mode Selection:**
+- The JIT selects addressing modes based on the profile data (e.g., stride, alignment)
+- It uses the Autotuner to determine the optimal addressing mode
+
+### 5.10 Lazy Compilation
+**Compile-on-First-Use:**
+- Functions are compiled lazily, only when they are first called
+- This reduces startup time and memory usage
+
+**Tiered Compilation:**
+- **Tier 0:** Interpreter (no compilation, just execution)
+- **Tier 1:** Quick JIT (minimal optimization, fast compilation)
+- **Tier 2:** Optimized JIT (full optimization, slower compilation)
+- Functions progress through the tiers based on their hotness
+
+### 5.11 Runtime Memory Optimizations
+**Profile-Guided Allocation:**
+- The JIT uses profile data to determine which allocations can be scalar-replaced
+- It uses PEA to eliminate allocations on the hot path
+
+**Runtime Garbage Collection Hints:**
+- The JIT inserts GC safepoints at optimal locations based on the profile data
+- It minimizes the overhead of GC pauses
+
+### 5.12 Adaptive Branch Prediction
+**Profile-Guided Branch Hints:**
+- The JIT inserts branch prediction hints based on the profile data
+- It uses the `likely` and `unlikely` attributes to guide the CPU's branch predictor
+
+**Runtime Branch Reordering:**
+- The JIT reorders branches based on the profile data
+- It places the most likely branch first to improve branch prediction
+
+### 5.13 Dynamic Dispatch Optimization
+**Call Site Specialization:**
+- The JIT specializes call sites based on the type profile
+- It generates specialized code for each type
+
+**Megamorphic Dispatch Stubs:**
+- For highly dynamic call sites, the JIT generates specialized dispatch stubs
+- These stubs use hash tables or binary search to find the target method
+
+### 5.14 Runtime Exception Handling
+**Lazy Unwind Table Generation:**
+- The JIT generates unwind tables lazily, only when an exception is thrown
+- This reduces the overhead of exception handling in the common case
+
+**Optimized Landing Pads:**
+- The JIT generates optimized landing pads based on the profile data
+- It minimizes the overhead of exception handling
+
+### 5.15 Cross-Function Optimization
+**Runtime Inlining Across Module Boundaries:**
+- The JIT inlines functions across module boundaries based on the profile data
+- It uses LTO (Link-Time Optimization) results as a baseline
+
+**Runtime Devirtualization Across Module Boundaries:**
+- The JIT devirtualizes calls across module boundaries based on the profile data
+- It uses CHA (Class Hierarchy Analysis) to determine the target method
+
+### 5.16 Self-Optimizing Code
+**Runtime Code Rewriting:**
+- The JIT rewrites its own code based on the profile data
+- It uses the Runtime Code Emitter to patch the code in place
+
+**Adaptive Code Layout:**
+- The JIT reorders code based on the profile data
+- It places hot code at the beginning of the function to improve icache locality
+
+**Runtime Dead Code Elimination:**
+- The JIT eliminates dead code based on the profile data
+- It removes code that is never executed
+
+---
+
+## Summary
+
+This design transforms the compiler from a pure AOT system into a **hybrid AOT/JIT system** that leverages the existing infrastructure (Autotuner, Sea of Nodes, PEA, CAS) to achieve:
+
+1. **Region-Based Partial Deoptimization:** Granular deoptimization that only affects the failing region, not the entire function
+2. **Lowest Overhead OSR:** Sub-microsecond transitions using pre-computed entry points, shadow stacks, and lazy materialization
+3. **Runtime Code Emitter:** A high-performance JIT backend that emits machine code directly into executable memory with W^X compliance
+4. **Incremental AOT→JIT Transition:** Zero-waste transitions that reuse AOT results and apply only the necessary changes
+5. **Complete JIT Optimization Catalog:** 16 categories of JIT-specific optimizations that leverage runtime profile data
+
