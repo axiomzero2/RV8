@@ -282,14 +282,14 @@ theorem recordDefs_keeps (st : SweepState) (i3 : Instr) :
     | imm w => exact Or.inr ⟨d, rfl⟩
     | reg s =>
       by_cases hs : st.2.2.contains s = true
-      · exact Or.inr ⟨d, by simp only [Instr.record, if_pos hs]⟩
-      · exact Or.inr ⟨d, by simp only [Instr.record, if_neg hs]⟩
+      · exact Or.inr ⟨d, by simp only [Instr.record, ite_eq_left hs]⟩
+      · exact Or.inr ⟨d, by simp only [Instr.record, ite_eq_right hs]⟩
   | binop d o a b =>
     by_cases ho : o = .udiv
-    · exact Or.inr ⟨d, by simp only [Instr.record, if_pos ho]⟩
+    · exact Or.inr ⟨d, by simp only [Instr.record, ite_eq_left ho]⟩
     · by_cases hg : argsDefined st.2.2 (a.regsOf ++ b.regsOf) = true
-      · exact Or.inr ⟨d, by simp only [Instr.record, if_neg ho, if_pos hg]⟩
-      · exact Or.inr ⟨d, by simp only [Instr.record, if_neg ho, if_neg hg]⟩
+      · exact Or.inr ⟨d, by simp only [Instr.record, ite_eq_right ho, ite_eq_left hg]⟩
+      · exact Or.inr ⟨d, by simp only [Instr.record, ite_eq_right ho, ite_eq_right hg]⟩
   | load d a => exact Or.inr ⟨d, rfl⟩
   | store a b => exact Or.inl rfl
   | call d f args => exact Or.inr ⟨d, rfl⟩

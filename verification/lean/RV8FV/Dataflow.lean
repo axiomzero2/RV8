@@ -53,11 +53,11 @@ theorem sweepToFix_stable {α : Type} [DecidableEq α] (tr : List α → List α
     intro s s' h
     simp only [sweepToFix] at h
     by_cases heq : tr s = s
-    · rw [if_pos heq] at h
+    · rw [ite_eq_left heq] at h
       have hs : s = s' := by simpa using h
       rw [← hs]
       exact heq
-    · rw [if_neg heq] at h
+    · rw [ite_eq_right heq] at h
       exact ih _ _ h
 
 /-! ## Predecessors. -/

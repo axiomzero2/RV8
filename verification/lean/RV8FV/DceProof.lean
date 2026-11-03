@@ -216,7 +216,7 @@ theorem usesExcept_mem : ∀ (j : Nat) (is : List Instr) (ek s : Nat) (i : Instr
     | cons i0 rest =>
       by_cases h0 : s = ek
       · exact absurd h0 (by simp [Nat.add_zero] at hne; exact hne)
-      · simp only [usesExcept, if_neg h0, List.mem_append]
+      · simp only [usesExcept, ite_eq_right h0, List.mem_append]
         have hii : i0 = i := by simpa using hi
         rw [hii]; exact Or.inl hx
   | succ j' ih =>
@@ -226,9 +226,9 @@ theorem usesExcept_mem : ∀ (j : Nat) (is : List Instr) (ek s : Nat) (i : Instr
     | cons i0 rest =>
       have hmem : rest[j']? = some i := by simpa using hi
       by_cases h1 : s = ek
-      · simp only [usesExcept, if_pos h1]
+      · simp only [usesExcept, ite_eq_left h1]
         exact ih rest ek (s + 1) i hmem (by omega) x hx
-      · simp only [usesExcept, if_neg h1, List.mem_append]
+      · simp only [usesExcept, ite_eq_right h1, List.mem_append]
         exact Or.inr (ih rest ek (s + 1) i hmem (by omega) x hx)
 
 theorem blockUsesExcept_mem (blk : Block) (ek j : Nat) (i : Instr)
@@ -268,9 +268,9 @@ theorem progUsesExcept_mem (p : Prog) (eb ek : Nat) :
           constructor
           · simp [hse]
           · exact hc
-        simp only [progUsesExcept, if_pos hse, List.mem_append]
+        simp only [progUsesExcept, ite_eq_left hse, List.mem_append]
         exact Or.inl (blockUsesExcept_mem blk ek j i hi hjk hx)
-      · simp only [progUsesExcept, if_neg hse, List.mem_append]
+      · simp only [progUsesExcept, ite_eq_right hse, List.mem_append]
         have hlen : j < blk.instrs.length := by
           by_cases hcl : j < blk.instrs.length
           · exact hcl
@@ -299,9 +299,9 @@ theorem term_uses_in_progUsesExcept (p : Prog) (eb ek : Nat) :
       rw [hbl0]
       intro x hx
       by_cases hse : s = eb
-      · simp only [progUsesExcept, if_pos hse, List.mem_append]
+      · simp only [progUsesExcept, ite_eq_left hse, List.mem_append]
         exact Or.inl (term_uses_in_blockUsesExcept blk ek hx)
-      · simp only [progUsesExcept, if_neg hse, List.mem_append]
+      · simp only [progUsesExcept, ite_eq_right hse, List.mem_append]
         exact Or.inl (term_uses_in_blockUsesExcept blk (blk.instrs.length) hx)
     | succ pc' =>
       have hrb : rest[pc']? = some blk := by simpa using hb

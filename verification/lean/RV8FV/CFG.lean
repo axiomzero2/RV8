@@ -236,13 +236,13 @@ theorem setTerm_other (p : Prog) (b c : BlockId) (t : Term) (h : c ≠ b) :
     (setTerm p b t).blocks[c]? = p.blocks[c]? := by
   show (setTermBlocks p.blocks b t)[c]? = p.blocks[c]?
   rw [setTermBlocks_at]
-  rw [if_neg h]
+  rw [ite_eq_right h]
 
 theorem setTerm_self (p : Prog) (b : BlockId) (t : Term) :
     (setTerm p b t).blocks[b]?
       = (p.blocks[b]?).map (fun bl => { bl with term := t }) := by
   show (setTermBlocks p.blocks b t)[b]? = _
   rw [setTermBlocks_at]
-  rw [if_pos rfl]
+  rw [ite_eq_left rfl]
 
 end RV8FV

@@ -22,6 +22,7 @@ import RV8FV.Fold
 import RV8FV.Dce
 import RV8FV.DceProof
 import RV8FV.Opt
+import RV8FV.OptSound
 import RV8FV.Pipeline
 import RV8FV.Pass
 import RV8FV.CFG

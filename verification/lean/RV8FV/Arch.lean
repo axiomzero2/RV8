@@ -110,8 +110,8 @@ theorem isel_optimal_within (pats : List IslPattern) (i : Instr) :
       simp only [List.foldl_cons] at h
       have hstep : ((if q.cost < b.cost then q else b)).cost ≤ b.cost := by
         by_cases hlt : q.cost < b.cost
-        · rw [if_pos hlt]; exact Nat.le_of_lt hlt
-        · rw [if_neg hlt]; exact Nat.le_refl _
+        · rw [ite_eq_left hlt]; exact Nat.le_of_lt hlt
+        · rw [ite_eq_right hlt]; exact Nat.le_refl _
       obtain ⟨hle, hrest⟩ := ih _ m h
       refine ⟨Nat.le_trans hle hstep, ?_⟩
       intro q' hq'
@@ -119,9 +119,9 @@ theorem isel_optimal_within (pats : List IslPattern) (i : Instr) :
       | inl heq =>
         rw [heq]
         by_cases hlt : q.cost < b.cost
-        · rw [if_pos hlt] at hle
+        · rw [ite_eq_left hlt] at hle
           exact hle
-        · rw [if_neg hlt] at hle
+        · rw [ite_eq_right hlt] at hle
           exact Nat.le_trans hle (Nat.le_of_not_gt hlt)
       | inr hmem => exact hrest q' hmem
   have hnone : ∀ (l : List IslPattern) (m : IslPattern),

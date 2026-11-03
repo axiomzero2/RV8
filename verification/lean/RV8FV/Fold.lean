@@ -88,11 +88,11 @@ theorem fold_step_agree (m : Machine) (i : Instr) :
       | imm y =>
         simp only [foldInstr]
         by_cases hu : (o = .udiv && y = 0) = true
-        · rw [if_pos hu]
+        · rw [ite_eq_left hu]
           simp only [Bool.and_eq_true] at hu
           obtain ⟨ho, _⟩ := hu
           rw [of_decide_eq_true ho]
-        · rw [if_neg hu]
+        · rw [ite_eq_right hu]
           simp only [foldEval]
           cases hf : o.eval x y with
           | none => rfl
