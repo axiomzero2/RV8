@@ -1,7 +1,9 @@
 // CEP:FILE: crates/rv8_runtime/src/intrinsics/softfloat.rs
 // CEP:WHAT: IEEE 754 soft-float add, sub, mul, and div for f32 and f64, built from integer
 //   bit manipulation with round-to-nearest-even, full subnormal support, infinities, and
-//   canonical quiet-NaN production.
+//   canonical quiet-NaN production; plus the sixteen int<->float conversions (design.md
+//   runtime section 5) with Rust `as`-cast semantics: round-to-nearest-even into the
+//   float, truncation toward zero with saturation and NaN -> 0 into the integer.
 // CEP:WHY: Standard 5.8 and design.md require software floating point for FPU-less targets;
 //   the compiler recognizes these symbols and may replace calls with hardware instructions
 //   when the target has an FPU.
@@ -18,7 +20,9 @@
 //   loops beyond the bounded normalization shifts.
 // CEP:EVIDENCE: bit-exact comparison against native f32/f64 across the value matrix
 //   (including subnormals, infinities, and NaN propagation) in
-//   crates/rv8_runtime/tests/runtime_foundation.rs, plus unit tests in this module.
+//   crates/rv8_runtime/tests/runtime_foundation.rs, plus unit tests in this module;
+//   the conversions are differentially pinned against native `as` casts by the
+//   deterministic LCG sweeps and adversarial edge matrices in this module
 
 /// CEP:WHAT: Format parameters of one IEEE 754 binary interchange width.
 /// CEP:WHY: One generic core serves f32 and f64; only these two widths are required by
@@ -482,6 +486,265 @@ pub fn soft_f64_div(a: f64, b: f64) -> f64 {
     f64::from_bits(div_bits::<F64P>(a.to_bits(), b.to_bits()))
 }
 
+// ---------------------------------------------------------------------------
+// Integer <-> float conversions (design.md runtime section 5: the software
+// intrinsics surface includes int/float conversions for FPU-less targets).
+// Semantics mirror Rust's `as` casts exactly: into the float, round-to-nearest-
+// even of the exact integer value (with subnormal/overflow IEEE defaults); into
+// the integer, truncation toward zero with saturation at the target bounds and
+// NaN -> 0.
+
+/// CEP:WHAT: Converts a signed magnitude into the P format with round-to-nearest-even.
+/// CEP:WHY: Shared core of the eight int-to-float entry points; the integer is exact,
+///   so the only decisions are normalization and the single rounding point.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: mag != 0 for the nonzero path (callers route zero through here too and
+///   get a signed-positive zero).
+/// CEP:COST: O(1) shifts.
+/// CEP:EVIDENCE: the native differential conversion tests.
+fn int_mag_to_float<P: Params>(sign: bool, mag: u64) -> u64 {
+    if mag == 0 {
+        return zero_bits::<P>(false);
+    }
+    let len = 64 - mag.leading_zeros(); // 1..=64
+    let e = (len - 1) as i32;
+    // Bring the top bit to the working position M+3: left-shift while it is below,
+    // right-shift (folding lost bits into sticky) once it is above.
+    let (w, sticky);
+    if len - 1 <= P::M + 3 {
+        w = mag << ((P::M + 3) - (len - 1));
+        sticky = false;
+    } else {
+        let shift = len - 1 - (P::M + 3);
+        sticky = (mag & ((1u64 << shift) - 1)) != 0;
+        w = mag >> shift;
+    }
+    round_pack::<P>(sign, e, w, sticky)
+}
+
+/// CEP:WHAT: Converts one raw P-format value into an integer with Rust `as` semantics:
+///   truncation toward zero, saturation at the signed/unsigned W-bit bounds, NaN -> 0.
+/// CEP:WHY: Shared core of the eight float-to-int entry points.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: w <= 127 (all four shipped targets are 32 or 64).
+/// CEP:COST: O(1) shifts.
+/// CEP:EVIDENCE: the native differential conversion tests.
+fn float_bits_to_int<P: Params>(bits: u64, signed: bool, w: u32) -> i128 {
+    // Every path - finite, infinite, and the i128-scale saturation - funnels through
+    // this clamp so the narrowed public casts are always in range.
+    let clamp = |mag: i128| -> i128 {
+        if signed {
+            let max = (1i128 << (w - 1)) - 1;
+            let min = -(1i128 << (w - 1));
+            mag.clamp(min, max)
+        } else if mag < 0 {
+            0
+        } else {
+            let max = (1i128 << w) - 1;
+            mag.clamp(0, max)
+        }
+    };
+    let d = unpack::<P>(bits);
+    match d.kind {
+        Kind::Nan | Kind::Zero => return 0,
+        Kind::Infinite => {
+            return clamp(if d.sign { i128::MIN } else { i128::MAX });
+        }
+        Kind::Finite => {}
+    }
+    // |value| = d.sig * 2^(d.exp - M); for subnormals exp is pinned to EMIN and the sig
+    // lacks the implicit bit, so the same formula holds. The truncated integer part is
+    // zero exactly when |value| < 1, i.e. d.exp < 0 for this decoded form (normals have
+    // sig >= 2^M, so value >= 2^d.exp).
+    if d.exp < 0 {
+        return 0;
+    }
+    let mag: i128 = if d.exp > 126 {
+        // Far beyond every i128 scale: saturate at the extreme, clamped below.
+        if d.sign {
+            i128::MIN
+        } else {
+            i128::MAX
+        }
+    } else {
+        let e = d.exp as u32;
+        let m: i128 = if e > P::M {
+            (d.sig as i128) << (e - P::M)
+        } else {
+            (d.sig as i128) >> (P::M - e)
+        };
+        if d.sign {
+            -m
+        } else {
+            m
+        }
+    };
+    clamp(mag)
+}
+
+/// CEP:WHAT: Soft i32 -> f32 conversion, bit-exact with `x as f32`.
+/// CEP:WHY: compiler-rt conversion symbol for FPU-less targets.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_i32_to_f32(x: i32) -> f32 {
+    f32::from_bits(int_mag_to_float::<F32P>(x < 0, x.unsigned_abs() as u64) as u32)
+}
+
+/// CEP:WHAT: Soft i32 -> f64 conversion, bit-exact with `x as f64`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_i32_to_f64(x: i32) -> f64 {
+    f64::from_bits(int_mag_to_float::<F64P>(x < 0, x.unsigned_abs() as u64))
+}
+
+/// CEP:WHAT: Soft u32 -> f32 conversion, bit-exact with `x as f32`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_u32_to_f32(x: u32) -> f32 {
+    f32::from_bits(int_mag_to_float::<F32P>(false, x as u64) as u32)
+}
+
+/// CEP:WHAT: Soft u32 -> f64 conversion, bit-exact with `x as f64`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_u32_to_f64(x: u32) -> f64 {
+    f64::from_bits(int_mag_to_float::<F64P>(false, x as u64))
+}
+
+/// CEP:WHAT: Soft i64 -> f32 conversion, bit-exact with `x as f32`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_i64_to_f32(x: i64) -> f32 {
+    f32::from_bits(int_mag_to_float::<F32P>(x < 0, x.unsigned_abs()) as u32)
+}
+
+/// CEP:WHAT: Soft i64 -> f64 conversion, bit-exact with `x as f64`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_i64_to_f64(x: i64) -> f64 {
+    f64::from_bits(int_mag_to_float::<F64P>(x < 0, x.unsigned_abs()))
+}
+
+/// CEP:WHAT: Soft u64 -> f32 conversion, bit-exact with `x as f32`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_u64_to_f32(x: u64) -> f32 {
+    f32::from_bits(int_mag_to_float::<F32P>(false, x) as u32)
+}
+
+/// CEP:WHAT: Soft u64 -> f64 conversion, bit-exact with `x as f64`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_u64_to_f64(x: u64) -> f64 {
+    f64::from_bits(int_mag_to_float::<F64P>(false, x))
+}
+
+/// CEP:WHAT: Soft f32 -> i32 conversion, bit-exact with `x as i32`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total (NaN -> 0, saturation at the bounds).
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_f32_to_i32(x: f32) -> i32 {
+    float_bits_to_int::<F32P>(x.to_bits() as u64, true, 32) as i32
+}
+
+/// CEP:WHAT: Soft f32 -> u32 conversion, bit-exact with `x as u32`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total (NaN -> 0, negatives -> 0, saturation at the bounds).
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_f32_to_u32(x: f32) -> u32 {
+    float_bits_to_int::<F32P>(x.to_bits() as u64, false, 32) as u32
+}
+
+/// CEP:WHAT: Soft f32 -> i64 conversion, bit-exact with `x as i64`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_f32_to_i64(x: f32) -> i64 {
+    float_bits_to_int::<F32P>(x.to_bits() as u64, true, 64) as i64
+}
+
+/// CEP:WHAT: Soft f32 -> u64 conversion, bit-exact with `x as u64`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_f32_to_u64(x: f32) -> u64 {
+    float_bits_to_int::<F32P>(x.to_bits() as u64, false, 64) as u64
+}
+
+/// CEP:WHAT: Soft f64 -> i32 conversion, bit-exact with `x as i32`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_f64_to_i32(x: f64) -> i32 {
+    float_bits_to_int::<F64P>(x.to_bits(), true, 32) as i32
+}
+
+/// CEP:WHAT: Soft f64 -> u32 conversion, bit-exact with `x as u32`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_f64_to_u32(x: f64) -> u32 {
+    float_bits_to_int::<F64P>(x.to_bits(), false, 32) as u32
+}
+
+/// CEP:WHAT: Soft f64 -> i64 conversion, bit-exact with `x as i64`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_f64_to_i64(x: f64) -> i64 {
+    float_bits_to_int::<F64P>(x.to_bits(), true, 64) as i64
+}
+
+/// CEP:WHAT: Soft f64 -> u64 conversion, bit-exact with `x as u64`.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; total.
+/// CEP:ASSUMES: none
+/// CEP:COST: O(1).
+/// CEP:EVIDENCE: native differential tests.
+pub fn soft_f64_to_u64(x: f64) -> u64 {
+    float_bits_to_int::<F64P>(x.to_bits(), false, 64) as u64
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -608,5 +871,155 @@ pub mod tests {
             soft_f64_mul(min_sub64, 0.5f64).to_bits(),
             (min_sub64 * 0.5f64).to_bits()
         );
+    }
+    /// CEP:WHAT: Deterministic LCG sweep: the eight int->float conversions match native
+    ///   `as` casts bit-exactly across thousands of values plus the adversarial edges
+    ///   (powers of two, +/-1 patterns, i64::MIN, u64::MAX).
+    /// CEP:WHY: The hardware is the arbiter of the soft conversion.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: panics via assert on mismatch (test-only).
+    /// CEP:ASSUMES: the host rounds to nearest even.
+    /// CEP:COST: test-only.
+    /// CEP:EVIDENCE: this test.
+    #[test]
+    fn int_to_float_matches_native_sweep() {
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut mags: Vec<u64> = Vec::new();
+        for k in 0..64 {
+            mags.push(1u64 << k);
+            mags.push((1u64 << k).wrapping_sub(1));
+            mags.push((1u64 << k).wrapping_add(1));
+        }
+        for i in 0..1000u64 {
+            mags.push(i);
+        }
+        for _ in 0..4000 {
+            mags.push(next());
+        }
+        for &m in &mags {
+            let i64v = m as i64;
+            assert_eq!(soft_i64_to_f64(i64v).to_bits(), (i64v as f64).to_bits(), "i64->f64 {i64v}");
+            assert_eq!(soft_i64_to_f32(i64v).to_bits(), (i64v as f32).to_bits(), "i64->f32 {i64v}");
+            assert_eq!(soft_u64_to_f64(m).to_bits(), (m as f64).to_bits(), "u64->f64 {m}");
+            assert_eq!(soft_u64_to_f32(m).to_bits(), (m as f32).to_bits(), "u64->f32 {m}");
+            let i32v = m as i32;
+            assert_eq!(soft_i32_to_f64(i32v).to_bits(), (i32v as f64).to_bits(), "i32->f64 {i32v}");
+            assert_eq!(soft_i32_to_f32(i32v).to_bits(), (i32v as f32).to_bits(), "i32->f32 {i32v}");
+            let u32v = m as u32;
+            assert_eq!(soft_u32_to_f64(u32v).to_bits(), (u32v as f64).to_bits(), "u32->f64 {u32v}");
+            assert_eq!(soft_u32_to_f32(u32v).to_bits(), (u32v as f32).to_bits(), "u32->f32 {u32v}");
+        }
+        // The i64::MIN magnitude (2^63) is unreachable via wrapping from positives.
+        assert_eq!(soft_i64_to_f64(i64::MIN).to_bits(), (i64::MIN as f64).to_bits());
+        assert_eq!(soft_i64_to_f32(i64::MIN).to_bits(), (i64::MIN as f32).to_bits());
+        assert_eq!(soft_u64_to_f64(u64::MAX).to_bits(), (u64::MAX as f64).to_bits());
+        assert_eq!(soft_u64_to_f32(u64::MAX).to_bits(), (u64::MAX as f32).to_bits());
+    }
+
+    /// CEP:WHAT: Deterministic LCG sweep: the eight float->int conversions match native
+    ///   `as` casts bit-exactly (truncation toward zero, saturation, NaN -> 0) across
+    ///   thousands of values plus the adversarial edges (NaN, infinities, subnormals,
+    ///   +/-0.5, the exact power-of-two boundaries of every target range).
+    /// CEP:WHY: The hardware is the arbiter of the soft conversion.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: panics via assert on mismatch (test-only).
+    /// CEP:ASSUMES: the host implements Rust saturating float->int casts.
+    /// CEP:COST: test-only.
+    /// CEP:EVIDENCE: this test.
+    #[test]
+    fn float_to_int_matches_native_sweep() {
+        let nan32 = f32::from_bits(0x7FC0_0000);
+        let nan64 = f64::from_bits(0x7FF8_0000_0000_0000);
+        let f32_edges = [
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            -0.5,
+            1.5,
+            -1.5,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::MAX,
+            -f32::MAX,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            nan32,
+            2147483520.0,  // largest f32 below i32::MAX
+            2147483648.0,  // i32::MAX + 1 exactly
+            -2147483904.0, // smallest f32 magnitude above i32::MIN
+            4294967040.0,  // largest f32 below u32::MAX
+            4294967296.0,  // u32::MAX + 1 exactly
+            9.223372e18,   // near i64::MAX
+            1.8446744e19,  // near u64::MAX
+        ];
+        for &v in &f32_edges {
+            assert_eq!(soft_f32_to_i32(v), v as i32, "f32->i32 {v}");
+            assert_eq!(soft_f32_to_u32(v), v as u32, "f32->u32 {v}");
+            assert_eq!(soft_f32_to_i64(v), v as i64, "f32->i64 {v}");
+            assert_eq!(soft_f32_to_u64(v), v as u64, "f32->u64 {v}");
+        }
+        let f64_edges = [
+            0.0f64,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            -0.5,
+            1.5,
+            -1.5,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+            f64::MAX,
+            -f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            nan64,
+            2147483647.0,
+            2147483648.0,
+            -2147483648.0,
+            -2147483649.0,
+            4294967295.0,
+            4294967296.0,
+            9223372036854775807.0,
+            -9223372036854775808.0,
+            18446744073709551615.0,
+        ];
+        for &v in &f64_edges {
+            assert_eq!(soft_f64_to_i32(v), v as i32, "f64->i32 {v}");
+            assert_eq!(soft_f64_to_u32(v), v as u32, "f64->u32 {v}");
+            assert_eq!(soft_f64_to_i64(v), v as i64, "f64->i64 {v}");
+            assert_eq!(soft_f64_to_u64(v), v as u64, "f64->u64 {v}");
+        }
+        let mut state: u64 = 0xDEADBEEFCAFEBABE;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..4000 {
+            let bits32 = next() as u32;
+            let v = f32::from_bits(bits32);
+            // Skip NaNs whose payload makes the native cast unspecified in either
+            // direction (both return 0 here, but keep the sweep robust).
+            if !v.is_nan() {
+                assert_eq!(soft_f32_to_i32(v), v as i32, "f32->i32 sweep {bits32:08x}");
+                assert_eq!(soft_f32_to_u64(v), v as u64, "f32->u64 sweep {bits32:08x}");
+            }
+            let bits64 = next();
+            let w = f64::from_bits(bits64);
+            if !w.is_nan() {
+                assert_eq!(soft_f64_to_i64(w), w as i64, "f64->i64 sweep {bits64:016x}");
+                assert_eq!(soft_f64_to_u32(w), w as u32, "f64->u32 sweep {bits64:016x}");
+            }
+        }
     }
 }
