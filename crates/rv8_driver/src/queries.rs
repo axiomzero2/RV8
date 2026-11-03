@@ -200,6 +200,11 @@ fn compile_one(hir: &rv8_ir::hir::HirFunction, ordinal: usize) -> Result<Functio
     }
     let _summary_son = rv8_middle::pipeline::optimize_son(&mut sea)
         .map_err(|e| DriverError::Stage { stage: "optimize_son", message: e.to_string() })?;
+    // Partial escape analysis (standard 5.6) runs after the SoN optimization pipeline
+    // and before lowering: scalar replacement and cold-path materialization rewrite the
+    // graph in place; the stage hash below therefore covers the post-PEA content.
+    let _pea = rv8_middle::pea::run_pea(&mut sea)
+        .map_err(|e| DriverError::Stage { stage: "pea", message: e.to_string() })?;
     let son_opt_hash = sea.canonical_hash();
     let mut het = rv8_ir::lower_het::son_to_hetir(&sea)
         .map_err(|e| DriverError::Stage { stage: "son_to_hetir", message: e.to_string() })?;
