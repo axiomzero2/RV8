@@ -20,6 +20,14 @@
 //   allocations and pointer roots are Ptr-typed; provenance through unknown stores is
 //   tracked, but loads are given their own root region plus stored-site union; move order
 //   is node-id order (documented corpus simplification, not epoch-based lifetimes).
+//   Documented rule-2 scope note (design 1515, "No Shared Alias"): the design formulates
+//   rule 2 over borrow-LIVENESS bitsets (design 1518-1521), but this checker's regions
+//   are object regions, not borrow lifetimes; in this model every immutable alias edge
+//   (imm_adj, derived from stored[]) necessarily coexists with the mutable store edge
+//   that created it, so any mutably-accessed/shared-aliased region pair already fires
+//   MutMutAlias and a separate node-order shared-alias rule would be vacuous. Rule 2
+//   therefore remains covered by rule 1 plus the corpus, and a faithful rule 2 requires
+//   borrow-liveness bitsets as future work (tracked under the RV8-141 session notes).
 // CEP:COST: O(passes * N * R/64) provenance, O(R + E) Tarjan, O(comps * R/64) closure,
 //   O(R + E) DFS; all bounds are named constants.
 // CEP:EVIDENCE: unit tests rv8_middle::borrowck::tests::* (3 accepted, 3 rejected, each

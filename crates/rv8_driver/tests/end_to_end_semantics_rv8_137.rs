@@ -483,3 +483,107 @@ fn two_swaps_over_three_iterations() {
     );
     assert_eq!(code, 10, "odd iteration count still preserves the total");
 }
+
+/// CEP:WHAT: The ETXTBSY regression battery (RV8-142): twenty distinct deterministic
+///   programs (arithmetic, comparisons, loops, nested expressions) executed concurrently
+///   by eight test threads - 160 spawns through pipeline::run in one process, plus
+///   single-threaded verification of each program's exit code.
+/// CEP:WHY: CI observed one "spawn exec: Text file busy (os error 26)" flake in
+///   le_loop_is_inclusive even after the per-invocation unique temp path landed: exec
+///   refuses a file any process still holds open for writing, which a unique name alone
+///   cannot rule out under aggressive parallelism. pipeline::run now retries ETXTBSY on
+///   a fresh unique path (bounded) and removes the temporary executable after each run;
+///   this battery is the standing regression guard: every program below is the twentieth
+///   part of the regression set and runs under full concurrency.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: unix exec available; exit codes stay below 256.
+/// CEP:COST: test-only; 160 tiny compiles and spawns.
+/// CEP:EVIDENCE: this battery; the CI failure log of run 41703539038.
+const ETXTBSY_PROGRAMS: &[(&str, i32)] = &[
+    ("fn main() -> i32 { 6 + 7 }", 13),
+    ("fn main() -> i32 { 100 - 58 }", 42),
+    ("fn main() -> i32 { 4 * 5 + 2 }", 22),
+    ("fn main() -> i32 { 2 * 3 * 7 }", 42),
+    ("fn main() -> i32 { let mut x = 9; if 1 < 2 { x = 5; } x }", 5),
+    ("fn main() -> i32 { let mut x = 0; if 2 == 2 { x = 30; } x }", 30),
+    ("fn main() -> i32 { let mut x = 1; if 3 <= 2 { x = 1; } else { x = 77; } x }", 77),
+    ("fn main() -> i32 { 50 / 5 }", 10),
+    ("fn main() -> i32 { 100 / 10 / 2 }", 5),
+    ("fn main() -> i32 { 17 - 2 * 3 }", 11),
+    ("fn main() -> i32 { 7 + 8 - 3 }", 12),
+    ("fn main() -> i32 { 9 - 4 - 3 }", 2),
+    ("fn main() -> i32 { (10 - 7) * (6 + 3) }", 27),
+    ("fn main() -> i32 { 64 / 8 }", 8),
+    ("fn main() -> i32 { 1 + 1 + 1 + 1 + 1 }", 5),
+    (
+        "fn main() -> i32 { let mut i = 1; let mut acc = 0; \
+         while i < 6 { acc = acc + i; i = i + 1; } acc }",
+        15,
+    ),
+    (
+        "fn main() -> i32 { let mut s = 0; let mut i = 0; \
+         while i <= 3 { s = s + i; i = i + 1; } s }",
+        6,
+    ),
+    (
+        "fn main() -> i32 { let mut s = 0; let mut i = 0; \
+         while i < 7 { s = s + i; i = i + 2; } s }",
+        12,
+    ),
+    (
+        "fn main() -> i32 { let mut p = 1; let mut i = 1; \
+         while i < 6 { p = p * i; i = i + 1; } p }",
+        120,
+    ),
+    (
+        "fn main() -> i32 { let mut x = 1; \
+         while x < 8 { x = x * 2; } x }",
+        8,
+    ),
+];
+
+/// CEP:WHAT: Single-threaded pass over all twenty battery programs, pinning every exit
+///   code before the concurrency stress runs.
+/// CEP:WHY: Separates "wrong result" from "spawn race" so the battery failure is
+///   diagnosable.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: none
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this battery.
+#[test]
+#[cfg(unix)]
+fn etxtbsy_battery_programs_are_correct_single_threaded() {
+    for (idx, (src, expected)) in ETXTBSY_PROGRAMS.iter().enumerate() {
+        let code = run_src(src);
+        assert_eq!(code, *expected, "program {idx} single-threaded exit code");
+    }
+}
+
+/// CEP:WHAT: Eight threads each run all twenty battery programs concurrently through
+///   pipeline::run (160 spawns in one process), the exact regime that produced the
+///   ETXTBSY flake.
+/// CEP:WHY: The flake-regression guard must exercise the racing regime itself.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: panics via assert (test-only).
+/// CEP:ASSUMES: unix exec available; the test harness runs test threads in parallel.
+/// CEP:COST: test-only.
+/// CEP:EVIDENCE: this battery.
+#[test]
+#[cfg(unix)]
+fn etxtbsy_battery_concurrent_spawns() {
+    std::thread::scope(|scope| {
+        for t in 0..8u32 {
+            scope.spawn(move || {
+                for (idx, (src, expected)) in ETXTBSY_PROGRAMS.iter().enumerate() {
+                    let code = run_src(src);
+                    assert_eq!(
+                        code, *expected,
+                        "thread {t} program {idx} exit code under concurrency"
+                    );
+                }
+            });
+        }
+    });
+}

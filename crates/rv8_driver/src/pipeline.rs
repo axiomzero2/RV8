@@ -116,21 +116,48 @@ pub fn run(session: &Session, program: &CompiledProgram) -> Result<i32, DriverEr
         // executable file. Process id separates processes; the atomic counter
         // separates threads. The fixed name made parallel end-to-end tests flake
         // on write/exec races (RV8-137 follow-up).
+        //
+        // ETXTBSY hardening (2026-11-04 session): CI still observed one
+        // "spawn exec: Text file busy (os error 26)" even with unique paths -
+        // exec refuses a file ANY process still holds open for writing, which a
+        // unique name alone cannot rule out under aggressive test parallelism
+        // (write/close visibility windows). The spawn therefore retries on
+        // ETXTBSY with a FRESH unique path (bounded retries, never silent), and
+        // the temporary executable is removed after the run so a long-lived
+        // session can never revisit a live file.
         static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!(
-            "rv8c_run_bin_{}_{}",
-            std::process::id(),
-            seq
-        ));
-        std::fs::write(&path, &image)
-            .map_err(|e| DriverError::Io(format!("write exec: {e}")))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| DriverError::Io(format!("chmod exec: {e}")))?;
-        let status = std::process::Command::new(&path)
-            .status()
-            .map_err(|e| DriverError::Io(format!("spawn exec: {e}")))?;
-        let actual = status.code().unwrap_or(-1);
+        const MAX_SPAWN_ATTEMPTS: u32 = 4;
+        let mut attempt: u32 = 0;
+        let actual = loop {
+            attempt += 1;
+            let seq = RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let path = std::env::temp_dir().join(format!(
+                "rv8c_run_bin_{}_{}_{}",
+                std::process::id(),
+                seq,
+                attempt
+            ));
+            std::fs::write(&path, &image)
+                .map_err(|e| DriverError::Io(format!("write exec: {e}")))?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| DriverError::Io(format!("chmod exec: {e}")))?;
+            let spawned = std::process::Command::new(&path).status();
+            // The file's life ends with this invocation; removal happens whether the
+            // spawn succeeded or not.
+            let remove = std::fs::remove_file(&path);
+            match spawned {
+                Ok(status) => break status.code().unwrap_or(-1),
+                Err(e) if e.raw_os_error() == Some(26) && attempt < MAX_SPAWN_ATTEMPTS => {
+                    // ETXTBSY: retire this path, try a fresh one.
+                    let _ = remove;
+                    continue;
+                }
+                Err(e) => {
+                    let _ = remove;
+                    return Err(DriverError::Io(format!("spawn exec: {e}")));
+                }
+            }
+        };
         if let Some(expected) = session.expect_exit {
             if actual != expected {
                 return Err(DriverError::ExitMismatch { expected, actual });
