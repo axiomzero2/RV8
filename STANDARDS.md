@@ -35,7 +35,9 @@ The curated catalog contains 176 optimizations in six categories:
 | 121-140 | Procedure and link-time |
 | 141-176 | Advanced and systems |
 
-Removed by design decision (do not implement): e-graphs/rewriting saturation, polyhedral compilation, quantum abstractions, JIT-specific infrastructure. The catalog count is 176 after these removals.
+Removed by design decision (do not implement): e-graphs/rewriting saturation, polyhedral compilation, quantum abstractions. The catalog count is 176 after these removals.
+
+**JIT hybrid (RV8-141, 2026-11-04): in scope.** The earlier "remove JIT-specific infrastructure" decision is superseded. The compiler is an AOT-first JIT hybrid: design.md's "JIT Runtime & Adaptive Compilation" chapter (region-based partial deoptimization, on-stack replacement, the runtime code emitter, the AOT-to-JIT transition, and the runtime-optimization catalog) is binding, executed at hybrid tiering fidelity - the AOT pipeline remains the correctness oracle and the fallback tier, and every JIT path must be disableable so pure-AOT behavior stays reproducible for self-hosting.
 
 ## 4. Five-Level IR Contract (docs/specs/multi_level_ir.md)
 
@@ -92,6 +94,9 @@ Immutable session; demand-driven memoized queries; crate-DAG parallelism; rustc-
 ### 5.12 Self-Hosting
 Stage 2 output must equal Stage 3 output bit-for-bit. Fixed-seed hashing everywhere; scheduling-independent ordering; metadata sanitization (no wall-clock timestamps, no absolute paths).
 
+### 5.13 JIT Hybrid (rv8_runtime::jitmem, rv8_backend, rv8_middle)
+The runtime code emitter maps W^X executable memory (write-never-execute and execute-never-write, mmap-based on POSIX targets), encodes through the same two-pass deterministic layout as the object writer, and patches through recorded relocation records only. Region-based partial deoptimization carries per-region interpreter state summaries (DeoptState) produced alongside MachineIR; OSR entry points are generated from the same allocation as the entry code; tiering decisions are content-seeded and deterministic per input. Accept: emitted code executes and returns the expected result in-process; a deopt reconstructs the interpreter state exactly; disabling the JIT yields byte-identical AOT output.
+
 ## 6. Agent Review Checklist
 
 For every component delivered by a build agent, the reviewer records:
@@ -134,7 +139,10 @@ Convention pins from the RV8-137 follow-up session (2026-10-31, all enforced by 
 15. **Spill-scratch soundness.** A spill scratch write is permanent: source and memory scratches avoid the instruction's reads plus the exact live-out set at that MIR position (backward liveness initialized from block-crossing lanes); a destination scratch avoids only the live-out set (x86 reads operands before writing the destination). Immediate definitions spill through `StoreStackImm` with no register.
 16. **Test wiring.** Every `tests.rs`/`tests/` file must be declared as a module or integration target; an orphaned test file is a standards violation (the regalloc corpus shipped unwired with a syntax error and never executed).
 
-Open tickets recorded under section 7 rules: none. All four open tickets were resolved in the 2026-11-03 session:
+Open tickets recorded under section 7 rules:
+- **RV8-141** (open, 2026-11-04): JIT hybrid. Supersedes the "JIT-specific infrastructure removed by design decision" clause in section 3 (see the RV8-141 note there). The runtime code emitter, region-based partial deoptimization, OSR, the AOT-to-JIT tiering transition, and the runtime-optimization catalog are binding work per design.md 3021-3528 at hybrid tiering fidelity; the AOT pipeline stays the oracle and pure-AOT output must remain reproducible with the JIT disabled. Prior JIT-referencing acceptance text elsewhere in this file predates this decision and is amended by it.
+
+All four previously open tickets were resolved in the 2026-11-03 session:
 
 Resolved tickets (2026-11-03 session, all enforced by tests):
 - **RV8-133** (resolved): `rv8_core::blake3` lands the BLAKE3 core (zero external dependencies, incremental Hasher + XOF), pinned against vectors generated with the official implementation; `rv8_driver::cache::content_id` now hashes through it (convention 10's one-file swap held).
