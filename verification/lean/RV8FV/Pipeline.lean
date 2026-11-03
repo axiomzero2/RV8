@@ -30,7 +30,7 @@ namespace RV8FV
 def FoldFixpoint (p : Prog) : Prop := foldProg p = p
 
 /-- A folding fixpoint is semantics-equivalent to the original program. -/
-theorem foldFixpoint_equiv (p : Prog) (h : FoldFixpoint p) : SemEquiv p p := by
+theorem foldFixpoint_equiv (p : Prog) (_h : FoldFixpoint p) : SemEquiv p p := by
   unfold SemEquiv
   intro n m
   exact ObsEquiv_refl _

@@ -62,7 +62,7 @@ theorem soundOn_weaken {pre pre' : Prog → Prop} {f : Prog → Prog}
   fun p hp => h p (hle p hp)
 
 theorem soundOn_comp {pre : Prog → Prop} {f g : Prog → Prog}
-    (hf : SoundOn pre f) (hg : Sound g) (hpre : ∀ p, pre p → pre (f p)) :
+    (hf : SoundOn pre f) (hg : Sound g) (_hpre : ∀ p, pre p → pre (f p)) :
     SoundOn pre (g ∘ f) :=
   fun p hp n m => ObsEquiv_trans _ _ _ (hf p hp n m) (hg (f p) n m)
 

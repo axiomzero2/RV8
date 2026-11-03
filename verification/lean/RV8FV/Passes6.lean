@@ -54,7 +54,7 @@ structure Specialization where
   static : List (VReg × Word)
   residual : Prog
 
-def PartialEvalLegality (f g : Prog → Machine → Outcome) (σ : Specialization) : Prop :=
+def PartialEvalLegality (_f _g : Prog → Machine → Outcome) (_σ : Specialization) : Prop :=
   True -- the mix-line theorem is stated against the extracted evaluator; see frame
 
 /-- #142: supercompilation: drive the program by context: the driving
@@ -97,7 +97,7 @@ def Confluent (r : Instr → Instr → Prop) : Prop :=
 
 /-- #146: the dependence graph: an edge `i → j` when `j` reads what `i`
     writes or `i` is a memory effect ordered before `j`. -/
-def DepEdge (p : Prog) (i j : Instr) : Prop :=
+def DepEdge (_p : Prog) (i j : Instr) : Prop :=
   ∃ v, i.defOf = some v ∧ (Instr.usesOf j).contains v
 
 /-! ## #147-#151 Versioning, profiles, learned heuristics. -/
@@ -233,7 +233,7 @@ theorem p159_deterministic (jobs workers : Nat) :
 
 /-- #160: distributed compilation: the job→host map; the contract is that
     every job is assigned exactly once. -/
-def p160_assign (jobs hosts : Nat) (j : Nat) : Nat := j % hosts
+def p160_assign (_jobs hosts : Nat) (j : Nat) : Nat := j % hosts
 
 /-- #161: cloud offloading: the offload decision is a pure function of the
     job size and the link budget. -/

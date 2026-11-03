@@ -41,33 +41,35 @@ def smokeFolded : Prog :=
         term := .ret (some (.reg 1)) } ] }
 
 /-- The wrapped 64-bit result of 3 + 4 is 7. -/
-example : wadd 3 4 = 7 := by native_decide
+example : wadd 3 4 = 7 := rfl
 
 /-- Folding folds `3 + 4` into `7`. -/
 example : foldProg smokeProg = smokeFolded := by
   simp [smokeProg, smokeFolded, foldProg, foldInstr, foldEval, Binop.eval, wadd, wrap, W64]
 
 /-- Overflow wraps: `2^63 + 2^63` wraps to 0. -/
-example : wadd 9223372036854775808 9223372036854775808 = 0 := by native_decide
+example : wadd 9223372036854775808 9223372036854775808 = 0 := rfl
 
 /-- Division by zero traps, and the folder refuses to fold it. -/
 example : Binop.eval .udiv 5 0 = none := rfl
 
 /-! ## Smoke checks for the pass registry and the architecture. -/
 
+set_option maxRecDepth 8192 in
 /-- The registry mirrors the catalog: 176 frames with strictly increasing
     ids over 1..176 (machine-checked in Optimal.lean; re-checked here as
     executable facts). -/
-example : frames.length = 176 := by native_decide
+example : frames.length = 176 := by decide
 
+set_option maxRecDepth 8192 in
 example : (frames.map PassFrame.id).Pairwise (fun a b => a < b) := by
-  native_decide
+  decide
 
 /-- The one-allocator law on a concrete target: the allocator is the shared
     function at the target's register count. -/
 example (k : Nat) (p : Prog) :
     ({ name := "toy4", physRegs := k, alloc := sharedRegalloc k,
-       alloc_is_shared := fun q => rfl } : Target).alloc p = sharedRegalloc k p :=
+       alloc_is_shared := fun _ => rfl } : Target).alloc p = sharedRegalloc k p :=
   rfl
 
 /-- Strength reduction computes: `a * 4 = a << 2` on the wrapping word. -/

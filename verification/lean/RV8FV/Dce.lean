@@ -97,7 +97,7 @@ theorem listReplaceIdx_at : ∀ (xs : List Instr) (k j : Nat) (i : Instr),
   | [], j, k, _ => by
       by_cases h : j = k
       · simp [h, listReplaceIdx]
-      · simp [h, listReplaceIdx]
+      · simp [listReplaceIdx]
   | x :: xs, 0, 0, _ => rfl
   | x :: xs, 0, j + 1, _ => rfl
   | x :: xs, k + 1, 0, _ => rfl

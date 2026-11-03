@@ -286,7 +286,7 @@ def p09_version (p : Prog) (h : BlockId) (off : VReg) : Option Prog :=
 /-- #10: hoist the branch on loop-invariant condition `c` out of the loop at
     `h`: two specialized copies, selected before the loop. The specialized
     bodies keep and drop the guarded region respectively. -/
-def p10_unswitch (p : Prog) (h : BlockId) (c : Arg) (off : VReg) : Option Prog :=
+def p10_unswitch (p : Prog) (h : BlockId) (_c : Arg) (off : VReg) : Option Prog :=
   match p.blocks[h]? with
   | none => none
   | some bl =>
@@ -334,7 +334,7 @@ def p12_derived (base : VReg) : Instr → Instr
 /-- The power-of-two index of `w`: `k = log₂ w` when `w = 2^k` and `k < 64`
     (shift counts are 6-bit, so larger factors are never strength-reduced). -/
 def pow2Idx (w : Word) : Option Nat :=
-  if h : 2 ^ Nat.log2 w = w ∧ Nat.log2 w < 64 then some (Nat.log2 w) else none
+  if _h : 2 ^ Nat.log2 w = w ∧ Nat.log2 w < 64 then some (Nat.log2 w) else none
 
 /-- #13 rewrite: `d = a * 2^k` becomes `d = a << k`, everything else
     unchanged. Division is never touched. -/
@@ -633,7 +633,7 @@ def p25_splitCritical (p : Prog) (a : BlockId) : Option Prog :=
   | none => none
   | some bl =>
     match bl.term with
-    | .br c l r =>
+    | .br _c l r =>
       if (preds p l).length > 1 then p24_splitEdge p a l else p24_splitEdge p a r
     | _ => none
 

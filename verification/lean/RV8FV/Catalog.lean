@@ -224,15 +224,18 @@ def catalog : List PassSpec :=
      ⟨175, "Liquid Types Integration", 6, .systemLevel, .fv1, "specification entry; soundness proof tracked (CEP&CC 54.2.2)"⟩,
      ⟨176, "Dependent Type Erasure", 6, .systemLevel, .fv1, "specification entry; soundness proof tracked (CEP&CC 54.2.2)"⟩]
 
-theorem catalog_length : catalog.length = 176 := by native_decide
+set_option maxRecDepth 8192 in
+theorem catalog_length : catalog.length = 176 := by decide
 
+set_option maxRecDepth 8192 in
 theorem catalog_ids_strictly_increasing :
     (catalog.map PassSpec.id).Pairwise (fun a b => a < b) := by
-  native_decide
+  decide
 
 /-- The passes with complete FV-0 machine-checked proofs. -/
 def fv0Passes : List Nat := (catalog.filter (fun p => p.fv = .fv0)).map PassSpec.id
 
-theorem fv0Passes_value : fv0Passes = [34, 39] := by native_decide
+set_option maxRecDepth 8192 in
+theorem fv0Passes_value : fv0Passes = [34, 39] := by decide
 
 end RV8FV

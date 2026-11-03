@@ -333,7 +333,7 @@ def steensgaardMerge (st : PTState) : PTState :=
       | some ws' => ws'
       | none => [w])).eraseDups))
 
-def steensgaard (p : Prog) (fuel : Nat) : Option PTState :=
+def steensgaard (_p : Prog) (fuel : Nat) : Option PTState :=
   sweepToFix steensgaardMerge fuel []
 
 theorem steensgaard_stable (p : Prog) (st : PTState) (fuel : Nat)
@@ -350,7 +350,7 @@ def MayAlias (st : PTState) (v w : VReg) : Prop :=
 /-! ## #47 Escape analysis. -/
 
 /-- #47: `v` may escape: it is stored to memory or passed to a call. -/
-def MayEscape (p : Prog) (v : VReg) : Prop :=
+def MayEscape (_p : Prog) (v : VReg) : Prop :=
   ∃ bl : Block, ∃ i ∈ bl.instrs,
     match i with
     | .store a b => a = Arg.reg v ∨ b = Arg.reg v
@@ -583,7 +583,7 @@ def p62_safepoints (p : Prog) (period : Nat) (slot : VReg) : Prog :=
 /-- #63: a null check on `v` is redundant when the environment proves `v`
     non-null (in the LIR model: `v` is defined by an instruction that cannot
     produce the null encoding 0 and has no path-incoming zero). -/
-def NullChecked (p : Prog) (env : CEnv) (v : VReg) : Prop :=
+def NullChecked (_p : Prog) (env : CEnv) (v : VReg) : Prop :=
   match envLookup env v with
   | some (.imm w) => w ≠ 0
   | _ => False
@@ -637,8 +637,7 @@ def p63_removeChecks (p : Prog) (safe : BlockId → Nat → Bool) : Prog :=
 theorem p63_length (p : Prog) (safe : BlockId → Nat → Bool) :
     (p63_removeChecks p safe).blocks.length = p.blocks.length := by
   unfold p63_removeChecks
-  simp [List.length_map, List.length_zip, blockIds, List.length_range, Nat.min_self,
-    mapWithIdx_length]
+  simp [List.length_map, List.length_zip, blockIds, List.length_range]
 
 /-! ## #67-#70 Conversion simplification and type punning. -/
 

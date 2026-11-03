@@ -78,7 +78,7 @@ def main : IO Unit := do
     (frames.head!.id == 1 && frames.getLast!.id == 176)
   check "one shared regalloc law holds on a concrete target"
     (({ name := "toy4", physRegs := 16, alloc := sharedRegalloc 16,
-        alloc_is_shared := fun q => rfl } : Target).alloc smokeProg
+        alloc_is_shared := fun _ => rfl } : Target).alloc smokeProg
       == sharedRegalloc 16 smokeProg)
   check "strength reduction: 6 * 4 = 6 << 2" (wmul 6 4 == wshl 6 2)
   check "delta encoding round-trips" (deltaDecode (deltaEncode [5, 9, 20]) == [5, 9, 20])

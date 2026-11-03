@@ -37,3 +37,4 @@ import RV8FV.Arch
 import RV8FV.Optimal
 import RV8FV.Catalog
 import RV8FV.Smoke
+import RV8FV.Audit

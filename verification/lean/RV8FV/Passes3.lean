@@ -95,7 +95,7 @@ def p73_prefetch (p : Prog) (stride : Nat) (scratch : VReg) : Prog :=
 /-- #74: align a base address up to the line size `l`. -/
 def alignTo (base l : Nat) : Nat := (base + l - 1) / l * l
 
-theorem alignTo_aligned (base l : Nat) (hl : l > 0) : alignTo base l % l = 0 := by
+theorem alignTo_aligned (base l : Nat) (_hl : l > 0) : alignTo base l % l = 0 := by
   unfold alignTo
   exact Nat.mul_mod_left _ _
 
@@ -197,7 +197,7 @@ def p89_splitRange (r : Range) (t : Nat) : Option (Range × Range) :=
 
 /-- #90: a vreg is rematerializable when its single definition is a pure
     instruction over immediates: recomputing it is cheaper than spilling. -/
-def Rematerializable (p : Prog) (v : VReg) : Prop :=
+def Rematerializable (_p : Prog) (v : VReg) : Prop :=
   ∃ bl : Block, ∃ i ∈ bl.instrs, i.defOf = some v ∧
     match i with
     | .binop _ o (.imm _) (.imm _) => o ≠ .udiv

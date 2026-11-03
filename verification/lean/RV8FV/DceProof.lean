@@ -42,7 +42,7 @@ def EqExcept (d : VReg) (m m' : Machine) : Prop :=
   ∧ m.pc = m'.pc ∧ m.iip = m'.iip
 
 theorem EqExcept_refl (m : Machine) (d : VReg) : EqExcept d m m :=
-  ⟨fun v _ => rfl, fun _ => rfl, rfl, rfl⟩
+  ⟨fun _v _ => rfl, fun _ => rfl, rfl, rfl⟩
 
 theorem setReg_eq_except {m m' : Machine} {d e : VReg} {r : Option Word}
     (h : EqExcept d m m') : EqExcept d (setReg m e r) (setReg m' e r) := by

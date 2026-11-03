@@ -3,8 +3,10 @@ open Lake DSL
 
 /-
 CEP:FILE: verification/lean/lakefile.lean
-CEP:WHAT: Lake package for the RV8FV Lean 4 formalization: zero external dependencies,
-  one library (RV8FV), one test executable (rv8fvtest).
+CEP:WHAT: Lake package for the RV8FV Lean 4 formalization: zero external deps,
+  one library (RV8FV), one test executable (rv8fvtest).  Both carry
+  `@[default_target]`, so a bare `lake build` compiles the whole library plus
+  the test driver — a bare build must never be vacuous.
 CEP:WHY: CEP&CC 54.5.1 requires version-pinned, reproducible proof builds with
   `lake build` and `lake test` as CI gates.
 CEP:CLASS: FV-2
@@ -23,8 +25,9 @@ CEP:FV-AXIOMS: none.
 package «rv8fv» where
   leanOptions := #[⟨`autoImplicit, false⟩]
 
+@[default_target]
 lean_lib «RV8FV» where
 
-@[test_driver]
+@[default_target, test_driver]
 lean_exe «rv8fvtest» where
   root := `SmokeMain

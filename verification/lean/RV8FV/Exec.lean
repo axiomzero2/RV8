@@ -115,7 +115,7 @@ theorem Arg.eval_subst (m : Machine) (env : CEnv) (h : EnvCons m env) (a : Arg) 
     simp only [Arg.subst]
     cases hl : envLookup env x with
     | none => rfl
-    | some a' => simp [hl]; exact (h x a' hl).symm
+    | some a' => simp; exact (h x a' hl).symm
 
 /-- List argument evaluation is invariant under consistent substitution. -/
 theorem Arg.evalList_subst (m : Machine) (env : CEnv) (h : EnvCons m env) :

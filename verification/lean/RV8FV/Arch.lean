@@ -151,7 +151,7 @@ theorem isel_optimal_within (pats : List IslPattern) (i : Instr) :
 /-- The calling convention: argument vregs map to locations (registers
     below `k`, stack slots above), the return value to its register. Total
     and deterministic by construction. -/
-def AbiMap (k : Nat) (nparams : Nat) : Nat → VReg :=
+def AbiMap (k : Nat) (_nparams : Nat) : Nat → VReg :=
   fun i => base + i % k
 where
   base : VReg := 1000000

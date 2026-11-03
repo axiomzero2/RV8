@@ -142,9 +142,9 @@ theorem foldProg_run_eq : ∀ (n : Nat) (p : Prog) (m : Machine),
       simp only [run]
       rw [tick_foldProg p m]
       cases ht : tick p m with
-      | next m1 => simp only [ht]; exact foldProg_run_eq n p m1
-      | stuck t => simp only [ht]
-      | halt m1 v => simp only [ht]
+      | next m1 => exact foldProg_run_eq n p m1
+      | stuck t => rfl
+      | halt m1 v => rfl
 
 /-! ## The FV-0 theorems. -/
 
@@ -186,9 +186,11 @@ theorem ucount_foldProg : ∀ (n : Nat) (p : Prog) (m : Machine),
       simp only [ucount]
       rw [tick_foldProg p m, curNn_foldProg]
       cases ht : tick p m with
-      | next m1 => simp only [ht]; rw [ucount_foldProg n p m1]
-      | stuck t => simp only [ht]
-      | halt m1 v => simp only [ht]
+      | next m1 =>
+        simp only []
+        rw [ucount_foldProg n p m1]
+      | stuck t => rfl
+      | halt m1 v => rfl
 
 /-- Static size is preserved: folding is in-place. -/
 theorem foldProg_size (p : Prog) : (foldProg p).size = p.size := by

@@ -142,7 +142,7 @@ theorem targets_share_allocator (t₁ t₂ : Target) :
     assignment) are lowered to stack slots; the slot address is the spill
     location, and the pass is the load/store insertion around uses/defs
     (the mechanical form of the #88/#89 pair). -/
-def SpillBudget (k : Nat) (p : Prog) (σ : VReg → VReg) : Prop :=
+def SpillBudget (_k : Nat) (p : Prog) (σ : VReg → VReg) : Prop :=
   AllocValid σ p ∨ ∃ (overused : List VReg), overused.length > 0 ∧
     overused.all (fun v => ∃ i ∈ allInstrs p, v ∈ i.usesOf ++ i.defOf.toList)
 

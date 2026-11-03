@@ -115,7 +115,7 @@ def stepInstr (m : Machine) (i : Instr) : Except Trap Machine :=
       match v.eval m with
       | none => .error .undefRead
       | some w => .ok (setMem m addr w)
-  | .call d f args =>
+  | .call d _f args =>
     match Arg.evalList args m with
     | none => .error .undefRead
     | some _ =>

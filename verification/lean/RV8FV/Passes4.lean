@@ -125,7 +125,7 @@ def p103_owner (t workers : Nat) : Nat := t % workers
 
 /-- #103 fairness: for any worker id within range, that worker owns some
     step in the first `workers` steps (machine-checked). -/
-theorem p103_fair (workers t₀ : Nat) (hw : workers > 0) (ht₀ : t₀ < workers) :
+theorem p103_fair (workers t₀ : Nat) (_hw : workers > 0) (ht₀ : t₀ < workers) :
     ∃ t, p103_owner t workers = t₀ ∧ t < workers := by
   refine ⟨t₀, ?_, ht₀⟩
   simp only [p103_owner, Nat.mod_eq_of_lt ht₀]
@@ -149,7 +149,10 @@ def wsum : List Word → Word
   | x :: xs => wadd x (wsum xs)
 
 theorem wsum_lt : ∀ xs : List Word, wsum xs < W64
-  | [] => by native_decide
+  | [] => by
+      show 0 < W64
+      have hW : W64 = 18446744073709551616 := rfl
+      rw [hW]; omega
   | x :: xs => Nat.mod_lt _ (by
       have hW : W64 = 18446744073709551616 := rfl
       rw [hW]; omega)
@@ -210,7 +213,7 @@ def LockElidable (conflict : Nat → Nat → Prop) (s : Nat) : Prop :=
 /-- #110: atomic lowering: the atomic fetch-op semantics is the
     unreorderable read-modify-write; the mathematical object is the
     sequential-per-location semantics the target must provide. -/
-def AtomicSem (ld st : Nat → Prop) : Prop := True
+def AtomicSem (_ld _st : Nat → Prop) : Prop := True
 
 /-! ## #111-#113 Placement. -/
 

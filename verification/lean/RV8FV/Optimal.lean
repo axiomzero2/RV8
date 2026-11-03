@@ -274,20 +274,24 @@ def frames : List PassFrame :=
   ⟨175, "Liquid Types Integration", 6, .systemLevel, .fv1, "the transformation/system contract defined in RV8FV/Passes6.lean", "FV-1: definition complete; run-level equivalence tracked (CEP&CC 54.2.2, 54.3.1)"⟩,
   ⟨176, "Dependent Type Erasure", 6, .systemLevel, .fv1, "the transformation/system contract defined in RV8FV/Passes6.lean", "FV-1: definition complete; run-level equivalence tracked (CEP&CC 54.2.2, 54.3.1)"⟩ ]
 
-theorem frames_length : frames.length = 176 := by native_decide
+set_option maxRecDepth 8192 in
+theorem frames_length : frames.length = 176 := by decide
 
+set_option maxRecDepth 8192 in
 theorem frames_ids_strictly_increasing :
     (frames.map PassFrame.id).Pairwise (fun a b => a < b) := by
-  native_decide
+  decide
 
+set_option maxRecDepth 8192 in
 /-- The registry covers design.md exactly: the ids are 1..176. -/
 theorem frames_first_last : frames.head!.id = 1 ∧ frames.getLast!.id = 176 := by
-  native_decide
+  decide
 
 /-- The FV-0 passes of the registry: those whose defining files carry
     machine-checked theorems. -/
 def fv0Frames : List Nat := (frames.filter (fun p => p.fv = .fv0)).map PassFrame.id
 
-theorem fv0Frames_value : fv0Frames = [34, 39] := by native_decide
+set_option maxRecDepth 8192 in
+theorem fv0Frames_value : fv0Frames = [34, 39] := by decide
 
 end RV8FV
