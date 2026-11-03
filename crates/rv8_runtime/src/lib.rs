@@ -4,7 +4,8 @@
 //   Result contracts, RawVec/Vec growable buffers and Box over the runtime Allocator trait,
 //   the Iterator trait with map/filter/fold adapters, software intrinsics (128-bit division
 //   and remainder via 64-bit-limb shift-and-subtract, IEEE 754 soft-float add/sub/mul/div,
-//   memcpy/memset/memcmp), the fixed-region Bump allocator, and the bare-metal panic hook.
+//   memcpy/memset/memcmp), the fixed-region Bump allocator, the bare-metal panic hook, and
+//   the JIT executable-memory manager (jitmem: W^X code pages, RV8-141).
 // CEP:WHY: Standard 5.8 and design.md (the runtime section) require generated code to run
 //   without libc or std: primitives are compiler intrinsics, so the runtime defines the
 //   trait and type vocabulary, the collections, the allocator, and the software fallbacks.
@@ -32,6 +33,7 @@ pub mod boxed;
 pub mod bump;
 pub mod intrinsics;
 pub mod iter;
+pub mod jitmem;
 pub mod option;
 pub mod panic;
 pub mod traits;

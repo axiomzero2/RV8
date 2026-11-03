@@ -23,6 +23,7 @@ dependencies = [
  "rv8_ir",
  "rv8_isl",
  "rv8_middle",
+ "rv8_runtime",
 ]
 
 [[package]]
