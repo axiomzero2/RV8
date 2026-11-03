@@ -20,6 +20,7 @@ CEP:FV-AXIOMS: none.
 
 import RV8FV.Catalog
 import RV8FV.DceProof
+import RV8FV.Optimal
 
 namespace RV8FV
 
@@ -51,5 +52,29 @@ example : wadd 9223372036854775808 9223372036854775808 = 0 := by native_decide
 
 /-- Division by zero traps, and the folder refuses to fold it. -/
 example : Binop.eval .udiv 5 0 = none := rfl
+
+/-! ## Smoke checks for the pass registry and the architecture. -/
+
+/-- The registry mirrors the catalog: 176 frames with strictly increasing
+    ids over 1..176 (machine-checked in Optimal.lean; re-checked here as
+    executable facts). -/
+example : frames.length = 176 := by native_decide
+
+example : (frames.map PassFrame.id).Pairwise (fun a b => a < b) := by
+  native_decide
+
+/-- The one-allocator law on a concrete target: the allocator is the shared
+    function at the target's register count. -/
+example (k : Nat) (p : Prog) :
+    ({ name := "toy4", physRegs := k, alloc := sharedRegalloc k,
+       alloc_is_shared := fun q => rfl } : Target).alloc p = sharedRegalloc k p :=
+  rfl
+
+/-- Strength reduction computes: `a * 4 = a << 2` on the wrapping word. -/
+example (a : Word) : wmul a 4 = wshl a 2 := by
+  have h2 : (2 : Nat) % 64 = 2 := Nat.mod_eq_of_lt (by omega)
+  have h4 : (4 : Nat) = 2 ^ 2 := rfl
+  rw [h4]
+  simp only [wmul, wshl, wrap, h2]
 
 end RV8FV

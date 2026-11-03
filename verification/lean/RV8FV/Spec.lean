@@ -123,12 +123,12 @@ inductive Term where
 structure Block where
   instrs : List Instr
   term : Term
-  deriving Repr
+  deriving Repr, DecidableEq
 
 /-- A program: a list of blocks; entry is block 0. -/
 structure Prog where
   blocks : List Block
-  deriving Repr
+  deriving Repr, DecidableEq
 
 /-- The vreg defined by an instruction, if any (`store` and `nop` define none). -/
 def Instr.defOf : Instr → Option VReg
