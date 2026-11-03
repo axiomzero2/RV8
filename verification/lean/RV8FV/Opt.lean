@@ -21,11 +21,15 @@ CEP:FV-CLASS: FV-1
 CEP:FV-PROVER: Lean 4 (leanprover/lean4:v4.35.0, pinned in lean-toolchain)
 CEP:FV-SCRIPT: verification/lean/RV8FV/Opt.lean
 CEP:FV-SORRY-COUNT: 0
-CEP:FV-REFINEMENT: Structural lemmas below are proved (length preservation, append
-  composition, defined-set monotonicity). The per-tick execution agreement and
-  the end-to-end SemEquiv theorem for the full sweep are open obligations; the
-  proved subset (constant folding, RV8FV/Fold.lean; dead immediate-load
-  elimination, RV8FV/Dce.lean) carries the FV-0 theorems.
+CEP:FV-REFINEMENT: Machine-checked: length preservation, append composition,
+  defined-set monotonicity, and the #20 terminator agreement law
+  (`termStep` semantics, `tick_term_agree` bridge, `optTerm_step_agree`
+  per-step agreement under a consistent environment, `tick_of_term_replace`
+  corollary).  Still open (tracked FV-1 obligations): the per-tick execution
+  agreement of the *instruction* sweep (`Instr.process`) and the end-to-end
+  SemEquiv theorem for the full sweep; the proved subset (constant folding,
+  RV8FV/Fold.lean; dead immediate-load elimination, RV8FV/Dce.lean) carries
+  the program-level FV-0 theorems.
 CEP:FV-AXIOMS: none.
 -/
 
@@ -141,6 +145,80 @@ def opt (p : Prog) : Prog :=
   { p with blocks := p.blocks.map (fun bl =>
     { instrs := optBlock bl.instrs
       term := optTerm (envAt bl.instrs bl.instrs.length) bl.term }) }
+
+/-! ## Terminator execution and the #20 agreement law (machine-checked). -/
+
+/-- One-step execution of a terminator in a program with `L` blocks: exactly
+    the terminator branch of `tick` (jump, branch-on-word, return). -/
+def termStep (L : Nat) (m : Machine) : Term → Step
+  | .jmp l => if l < L then .next { m with pc := l, iip := 0 } else .stuck .badTarget
+  | .br c l r =>
+    match c.eval m with
+    | none => .stuck .undefRead
+    | some w =>
+      let l' := if w = 0 then r else l
+      if l' < L then .next { m with pc := l', iip := 0 } else .stuck .badTarget
+  | .ret a =>
+    match a with
+    | none => .halt m none
+    | some c => match c.eval m with
+      | none => .stuck .undefRead
+      | some w => .halt m (some w)
+
+/-- A tick at the end of a block is the term step of that block's terminator:
+    `tick` executes the terminator exactly when the cursor is past the last
+    instruction. -/
+theorem tick_term_agree (p : Prog) (m : Machine) (bl : Block)
+    (hbl : p.block? m.pc = some bl) (hiip : m.iip = bl.instrs.length) :
+    tick p m = termStep p.blocks.length m bl.term := by
+  simp only [tick, hbl]
+  rw [hiip]
+  simp
+  cases bl.term <;> rfl
+
+/-- **The #20 agreement law.**  Substituting operands by a consistent
+    environment and folding a constant conditional branch into a jump
+    preserves one-step terminator execution *literally*: same successor
+    machine, same trap class, same halt value. -/
+theorem optTerm_step_agree (env : CEnv) (t : Term) (L : Nat) (m : Machine)
+    (h : EnvCons m env) :
+    termStep L m (optTerm env t) = termStep L m t := by
+  cases t with
+  | jmp l => rfl
+  | br a l r =>
+    simp only [optTerm]
+    cases hs : a.subst env with
+    | imm w =>
+      have hae : a.eval m = some w := by
+        rw [← Arg.eval_subst m env h a, hs]
+        rfl
+      simp only [termStep, hae]
+    | reg x =>
+      have hae : a.eval m = m.regs x := by
+        rw [← Arg.eval_subst m env h a, hs]
+        rfl
+      simp only [termStep, hae]
+      rfl
+  | ret a =>
+    cases a with
+    | none => rfl
+    | some c =>
+      simp only [optTerm, termStep]
+      rw [Arg.eval_subst m env h c]
+
+/-- Replacing one block's terminator by its `optTerm` version (with a
+    consistent environment) leaves the tick literally unchanged: same
+    successor machine, same trap, same halt. -/
+theorem tick_of_term_replace (p p' : Prog) (m : Machine) (bl bl' : Block)
+    (hbl : p.block? m.pc = some bl) (hbl' : p'.block? m.pc = some bl')
+    (hiip : m.iip = bl.instrs.length) (hinstr : bl'.instrs = bl.instrs)
+    (hlen : p'.blocks.length = p.blocks.length)
+    (hterm : bl'.term = optTerm (envAt bl.instrs bl.instrs.length) bl.term)
+    (henv : EnvCons m (envAt bl.instrs bl.instrs.length)) :
+    tick p' m = tick p m := by
+  rw [tick_term_agree p' m bl' hbl' (by rw [hinstr]; exact hiip)]
+  rw [hterm, optTerm_step_agree _ _ _ m henv, hlen,
+    ← tick_term_agree p m bl hbl hiip]
 
 /-! ## Structural lemmas (proved). -/
 

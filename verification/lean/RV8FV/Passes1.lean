@@ -520,7 +520,11 @@ where
 /-! ## #20 Conditional Branch Optimization. -/
 
 /-- #20: implemented by the fused sweep `optTerm` of RV8FV/Opt.lean
-    (substitute known values, fold constant branches into jumps). -/
+    (substitute known values, fold constant branches into jumps).  The
+    agreement law is machine-checked: `optTerm_step_agree` (substitution by
+    a consistent environment preserves one-step terminator execution
+    literally) with the `tick_term_agree` bridge and the `tick_of_term_replace`
+    corollary, all in RV8FV/Opt.lean. -/
 def p20_optTerm (env : CEnv) : Term → Term := optTerm env
 
 /-! ## #21 Switch Statement Lowering. -/

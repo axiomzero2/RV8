@@ -82,4 +82,9 @@ def main : IO Unit := do
       == sharedRegalloc 16 smokeProg)
   check "strength reduction: 6 * 4 = 6 << 2" (wmul 6 4 == wshl 6 2)
   check "delta encoding round-trips" (deltaDecode (deltaEncode [5, 9, 20]) == [5, 9, 20])
+  -- #20 folds a constant conditional branch into a jump (zero is fallthrough)
+  check "optTerm folds a constant branch"
+    (optTerm [(1, .imm 5)] (.br (.reg 1) 2 3) == .jmp 2)
+  check "optTerm folds the zero branch"
+    (optTerm [(1, .imm 0)] (.br (.reg 1) 2 3) == .jmp 3)
   IO.println "smoke: all checks passed"
