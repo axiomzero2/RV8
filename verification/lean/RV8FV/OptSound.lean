@@ -325,6 +325,144 @@ theorem envAt_domains : ∀ (is : List Instr) (k : Nat) (x : VReg) (a : Arg),
         rw [hEq2]
         exact envAt_domains is k x a hl
 
+/-! ## Recorded-state shapes and freshness. -/
+
+/-- The defined-set after recording either stays or gets the instruction's
+    destination prepended. -/
+theorem record_defs_cons (st : SweepState) (i3 : Instr) :
+    (Instr.record st.1 st.2.1 st.2.2 i3).2.2 = st.2.2
+    ∨ ∃ e, i3.defOf = some e
+      ∧ (Instr.record st.1 st.2.1 st.2.2 i3).2.2 = e :: st.2.2 := by
+  cases i3 with
+  | nop => exact Or.inl rfl
+  | copy e a =>
+    cases a with
+    | imm w => exact Or.inr ⟨e, rfl, rfl⟩
+    | reg s =>
+      simp only [Instr.record]
+      split <;> exact Or.inr ⟨e, rfl, rfl⟩
+  | binop e o b1 b2 =>
+    simp only [Instr.record]
+    (try split) <;> (try split) <;> exact Or.inr ⟨e, rfl, rfl⟩
+  | load e a => exact Or.inr ⟨e, rfl, rfl⟩
+  | store a v => exact Or.inl rfl
+  | call e f args => exact Or.inr ⟨e, rfl, rfl⟩
+
+/-- Everything in the defined-set is either inherited from the seed state or
+    defined by some instruction of the swept block. -/
+theorem defsFrom_mem : ∀ (is : List Instr) (s : SweepState) (x : VReg),
+    x ∈ defsFrom s is → x ∈ s.2.2 ∨ x ∈ is.filterMap Instr.defOf
+  | [], s, x, h => Or.inl h
+  | i :: rest, s, x, h => by
+      have hrec := defsFrom_mem rest
+        (Instr.record s.1 s.2.1 s.2.2 (Instr.process s.1 s.2.1 i)) x h
+      rcases record_defs_cons s (Instr.process s.1 s.2.1 i) with hshape | ⟨e, hdef, hshape2⟩
+      · rw [hshape] at hrec
+        rcases hrec with hm | hm
+        · exact Or.inl hm
+        · obtain ⟨a, hamem, hadef⟩ := List.mem_filterMap.mp hm
+          exact Or.inr (List.mem_filterMap.mpr ⟨a, List.mem_cons_of_mem _ hamem,
+            hadef⟩)
+      · rw [hshape2] at hrec
+        rcases hrec with hm | hm
+        · rcases List.mem_cons.mp hm with rfl | hm2
+          · exact Or.inr (List.mem_filterMap.mpr ⟨i, List.mem_cons_self, by
+              rw [← process_defOf s.1 s.2.1 i]; exact hdef⟩)
+          · exact Or.inl hm2
+        · obtain ⟨a, hamem, hadef⟩ := List.mem_filterMap.mp hm
+          exact Or.inr (List.mem_filterMap.mpr ⟨a, List.mem_cons_of_mem _ hamem,
+            hadef⟩)
+
+/-- Every table key is a vreg defined earlier in the block, and every
+    register a table entry's operands read is defined earlier too. -/
+theorem tblAt_domains : ∀ (is : List Instr) (k : Nat) (o : Binop) (b1 b2 : Arg) (d : VReg),
+    tabLookup (tblAt is k) o b1 b2 = some d → d ∈ allDefsAt is k
+    ∧ (∀ r, r ∈ b1.regsOf ++ b2.regsOf → r ∈ allDefsAt is k)
+  | is, 0, o, b1, b2, d, hl => by
+      exfalso
+      have h0 : tblAt is 0 = ([] : CTab) := rfl
+      rw [h0] at hl
+      simp [tabLookup] at hl
+  | is, k + 1, o, b1, b2, d, hl => by
+      by_cases hkl : k < is.length
+      · rw [allDefsAt_succ is k hkl]
+        rw [tblAt_succ is k hkl] at hl
+        cases hi3 : Instr.process (envAt is k) (tblAt is k) is[k] with
+        | nop =>
+          simp only [hi3, Instr.record] at hl ⊢
+          exact tblAt_domains is k o b1 b2 d hl
+        | copy e a =>
+          cases a with
+          | imm w =>
+            simp only [hi3, Instr.record] at hl ⊢
+            obtain ⟨h1, h2⟩ := tblAt_domains is k o b1 b2 d hl
+            exact ⟨List.mem_cons_of_mem _ h1, fun r hr =>
+              List.mem_cons_of_mem _ (h2 r hr)⟩
+          | reg s =>
+            simp only [hi3, Instr.record] at hl ⊢
+            by_cases hcond : (allDefsAt is k).contains s = true
+            · rw [ite_eq_left hcond] at hl ⊢
+              obtain ⟨h1, h2⟩ := tblAt_domains is k o b1 b2 d hl
+              exact ⟨List.mem_cons_of_mem _ h1, fun r hr =>
+                List.mem_cons_of_mem _ (h2 r hr)⟩
+            · rw [ite_eq_right hcond] at hl ⊢
+              obtain ⟨h1, h2⟩ := tblAt_domains is k o b1 b2 d hl
+              exact ⟨List.mem_cons_of_mem _ h1, fun r hr =>
+                List.mem_cons_of_mem _ (h2 r hr)⟩
+        | binop e ob c1 c2 =>
+          simp only [hi3, Instr.record] at hl ⊢
+          by_cases hou : ob = .udiv
+          · rw [ite_eq_left hou] at hl ⊢
+            obtain ⟨h1, h2⟩ := tblAt_domains is k o b1 b2 d hl
+            exact ⟨List.mem_cons_of_mem _ h1, fun r hr =>
+              List.mem_cons_of_mem _ (h2 r hr)⟩
+          · rw [ite_eq_right hou] at hl ⊢
+            by_cases hargs : argsDefined (allDefsAt is k) (c1.regsOf ++ c2.regsOf) = true
+            · rw [ite_eq_left hargs] at hl ⊢
+              simp only [tabLookup] at hl
+              by_cases hmatch : (o = ob && b1 = c1 && b2 = c2) = true
+              · rw [ite_eq_left hmatch] at hl
+                have hed : e = d := by injection hl with h
+                subst hed
+                have hexp : (o = ob ∧ b1 = c1) ∧ b2 = c2 := by simpa using hmatch
+                obtain ⟨⟨hob, hc1⟩, hc2⟩ := hexp
+                refine ⟨List.mem_cons_self, ?_⟩
+                intro r hr
+                rw [hc1, hc2] at hr
+                exact List.mem_cons_of_mem _
+                  (List.contains_iff_mem.mp (List.all_eq_true.mp hargs r hr))
+              · rw [ite_eq_right hmatch] at hl
+                obtain ⟨h1, h2⟩ := tblAt_domains is k o b1 b2 d hl
+                exact ⟨List.mem_cons_of_mem _ h1, fun r hr =>
+                  List.mem_cons_of_mem _ (h2 r hr)⟩
+            · rw [ite_eq_right hargs] at hl ⊢
+              obtain ⟨h1, h2⟩ := tblAt_domains is k o b1 b2 d hl
+              exact ⟨List.mem_cons_of_mem _ h1, fun r hr =>
+                List.mem_cons_of_mem _ (h2 r hr)⟩
+        | load e a =>
+          simp only [hi3, Instr.record] at hl ⊢
+          obtain ⟨h1, h2⟩ := tblAt_domains is k o b1 b2 d hl
+          exact ⟨List.mem_cons_of_mem _ h1, fun r hr =>
+            List.mem_cons_of_mem _ (h2 r hr)⟩
+        | store a1 a2 =>
+          simp only [hi3, Instr.record] at hl ⊢
+          exact tblAt_domains is k o b1 b2 d hl
+        | call e f as =>
+          exfalso
+          simp [hi3, Instr.record, tabLookup] at hl
+      · -- past the end of the block the sweep state is stationary
+        have h1 : is.take (k + 1) = is := take_full is (k + 1) (by simp at hkl; omega)
+        have h2 : is.take k = is := take_full is k (by simp at hkl; omega)
+        have hEq1 : tblAt is (k + 1) = tblAt is k := by
+          simp only [tblAt, tblAtF, sweepStateF]
+          rw [h1, h2]
+        have hEq2 : allDefsAt is (k + 1) = allDefsAt is k := by
+          simp only [allDefsAt, allDefsAtF]
+          rw [h1, h2]
+        rw [hEq1] at hl
+        rw [hEq2]
+        exact tblAt_domains is k o b1 b2 d hl
+
 /-! ## The per-instruction agreement law. -/
 
 /-- The CSE branch of the binop processing steps like the original binop:
