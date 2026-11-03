@@ -1,10 +1,12 @@
 /-
 CEP:FILE: verification/lean/RV8FV/Audit.lean
-CEP:WHAT: The FV-0 axiom audit gate.  For every flagship theorem of the
-  formalization the gate walks its transitive axiom dependencies with
-  `Lean.collectAxioms` and fails the build if any dependency is outside the
-  whitelist {propext, Classical.choice, Quot.sound} — in particular it fails
-  on `sorryAx`, so a single `sorry` anywhere below an audited theorem breaks
+CEP:WHAT: The FV-0 axiom audit gate.  The gate (1) checks that all flagship
+  theorems exist (renames/deletions fail the build) and (2) sweeps EVERY
+  user-facing constant of the RV8FV namespace — definitions and theorems
+  alike — walking each one's transitive axiom dependencies with
+  `Lean.collectAxioms` and failing the build if any dependency is outside
+  the whitelist {propext, Classical.choice, Quot.sound} — in particular it
+  fails on `sorryAx`, so a single `sorry` anywhere in the development breaks
   `lake build`.
 CEP:WHY: CEP&CC 54.2 requires FV-0 results to be machine-checked with zero
   `sorry`.  A build-log grep alone is weak evidence; this gate makes the
@@ -12,8 +14,8 @@ CEP:WHY: CEP&CC 54.2 requires FV-0 results to be machine-checked with zero
   compiler itself on every build and every CI run.
 CEP:CLASS: FV-0
 CEP:STATUS: complete
-CEP:FAILURE: If an audited constant is missing (renamed or deleted) the audit
-  fails; if an audited theorem (transitively) depends on a non-whitelisted
+CEP:FAILURE: If a flagship constant is missing (renamed or deleted) the audit
+  fails; if ANY RV8FV constant (transitively) depends on a non-whitelisted
   axiom the audit fails.  Both fail `lake build`.
 CEP:ASSUMES: Lean's logical foundation is exactly {propext,
   Classical.choice, Quot.sound}; no custom `axiom` declarations are permitted
@@ -22,9 +24,9 @@ CEP:FV-CLASS: FV-0
 CEP:FV-PROVER: Lean 4 (leanprover/lean4:v4.35.0, pinned in lean-toolchain)
 CEP:FV-SCRIPT: verification/lean/RV8FV/Audit.lean
 CEP:FV-SORRY-COUNT: 0
-CEP:FV-REFINEMENT: the audited theorems are the flagship results of Wrd, CFG,
-  Pass, Dataflow, Passes1-6, RegAlloc, Arch and Optimal (one or two per
-  module); the whitelist is the standard axiomatic basis of Lean 4.
+CEP:FV-REFINEMENT: the canary list is the flagship results of Wrd, CFG,
+  Pass, Dataflow, Passes1-6, RegAlloc, Arch and Optimal; the sweep is total
+  over the namespace; the whitelist is the standard axiomatic basis of Lean 4.
 CEP:FV-AXIOMS: none (the audit's whole purpose is to prove none exist).
 -/
 
@@ -120,20 +122,30 @@ def Audit.targets : List Name :=
    `RV8FV.frames_first_last, `RV8FV.fv0Frames_value, `RV8FV.catalog_length]
 
 -- The gate itself: run at elaboration time, so `lake build` fails
--- immediately when the whitelist is violated.
+-- immediately when the whitelist is violated.  Two passes:
+-- 1. the flagship list must all exist (renames and deletions fail here);
+-- 2. EVERY user-facing constant of the RV8FV namespace is swept: each one's
+--    transitive axiom dependencies must be inside the whitelist.  Auxiliary
+--    lemmas are covered transitively (collectAxioms walks the full dependency
+--    graph), so the sweep is total for everything a user can state.
 open Lean Elab Command in
 run_cmd do
   let env ← getEnv
   let wl : List Name := (RV8FV.Audit.whitelist : List Name)
-  let mut audited := 0
+  -- 1. flagship canaries: existence
   for n in (RV8FV.Audit.targets : List Name) do
     if !Lean.Environment.contains env n then
       throwError s!"audit: constant {n} not found (renamed or deleted?)"
+  -- 2. exhaustive sweep over the namespace
+  let mut audited := 0
+  for (n, _) in env.constants.toList do
+    if n.getRoot != `RV8FV then continue
+    if n.isInternal then continue
     let ax ← liftCoreM (Lean.collectAxioms n)
     for a in ax do
       unless wl.contains a do
         throwError s!"audit: {n} depends on non-whitelisted axiom {a}"
     audited := audited + 1
-  logInfo s!"axiom audit: {audited} theorems, whitelist propext/Classical.choice/Quot.sound"
+  logInfo s!"axiom audit: all {audited} RV8FV constants + {(@RV8FV.Audit.targets : List Name).length} flagship canaries, whitelist propext/Classical.choice/Quot.sound"
 
 end RV8FV
