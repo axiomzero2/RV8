@@ -202,7 +202,7 @@ pub struct Range<T> {
     pub end: T,
 }
 
-macro_rules! range_for_int {
+macro_rules! CEP_range_for_int {
     ($($t:ty),+ $(,)?) => {
         $(
             impl Iterator for Range<$t> {
@@ -232,7 +232,7 @@ macro_rules! range_for_int {
     };
 }
 
-range_for_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+CEP_range_for_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
 
 /// CEP:WHAT: A slice iterator yielding references to the remaining elements.
 /// CEP:WHY: design.md provides slice iteration as a basic implementation.

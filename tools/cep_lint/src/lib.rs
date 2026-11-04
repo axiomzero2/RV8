@@ -27,7 +27,10 @@ pub mod scan;
 pub mod waivers;
 
 pub use config::{Config, ConfigError, Rule};
-pub use engine::{lint_paths, LintEngine, LintError, RunOutcome};
+pub use engine::{
+    find_repo_root, lint_paths, run_self_test, version_banner, LintEngine, LintError, RunOutcome,
+    SelfTestOutcome,
+};
 pub use rules::Finding;
 
 /// Crate version for the CLI banner.

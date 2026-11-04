@@ -126,6 +126,7 @@ pub fn run_file_rules(config: &Config, path: &str, scan: &FileScan) -> Vec<Findi
                 }
             }
             "flat_code_regex" => findings.extend(flat_code_regex(rule, &ctx)),
+            "macro_prefix_policy" => findings.extend(macro_prefix(rule, &ctx)),
             "key_vocabulary" => findings.extend(key_vocabulary(rule, &ctx)),
             _ => {}
         }
@@ -495,6 +496,85 @@ fn pattern_text(pattern: Option<&str>) -> String {
 /// CONSTANT-RETURN: literal-constant return statements (C-family stand-in returns).
 fn constant_return(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
     pattern_line_rule(rule, ctx)
+}
+
+/// MACRO-PREFIX: macro definitions must carry the configured name prefix.
+///
+/// CEP:WHAT: The macro_prefix_policy check.  C++ preprocessor `#define NAME ...` lines
+///   and, per the CEP&CC 0.3 Rust mapping, `macro_rules! NAME` definitions are the
+///   recognized object-like macro forms; a defined name is compliant when it matches
+///   `name_pattern` (the CEP_ prefix law of section 33.16) or the include-guard
+///   `guard_pattern`, and any other macro definition is a finding at its line.
+/// CEP:WHY: Section 33.16 requires prefixed macro names so a macro's origin is visible at
+///   every use site; mechanical enforcement keeps the discipline from rotting.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: findings name the macro and its line; pattern-compile failures degrade to
+///   no findings (already rejected at config validation).
+/// CEP:ASSUMES: the scan's code lines are comment- and string-stripped, so macro-looking
+///   text inside comments or string literals cannot reach this check; `#undef` is not a
+///   definition and is never flagged.
+/// CEP:COST: one linear pass over code lines per configured macro rule.
+/// CEP:EVIDENCE: rules::tests macro_prefix fixtures cover both dialects, both exemption
+///   patterns, and the violation path.
+fn macro_prefix(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
+    let name_re = match rule.name_pattern.as_deref().map(|p| Regex::new(p, false)) {
+        Some(Ok(re)) => re,
+        _ => return Vec::new(),
+    };
+    let guard_re = rule
+        .guard_pattern
+        .as_deref()
+        .and_then(|p| Regex::new(p, false).ok());
+    let mut findings = Vec::new();
+    for (index, line) in ctx.scan.code.iter().enumerate() {
+        let name = match macro_definition_name(line) {
+            Some(name) => name,
+            None => continue,
+        };
+        let prefixed = name_re.find(&name).is_some();
+        let guarded = guard_re
+            .as_ref()
+            .map(|re| re.find(&name).is_some())
+            .unwrap_or(false);
+        if !prefixed && !guarded {
+            findings.push(Finding::new(
+                rule.severity,
+                ctx.path,
+                index + 1,
+                &rule.id,
+                format!(
+                    "macro '{}' does not match the required prefix or guard pattern",
+                    name
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+/// Extracts the defined name from a macro definition line, if the line is one.
+/// Recognizes `#define NAME`, `#  define NAME` (whitespace after `#`), the function-like
+/// `#define NAME(..)` shape, and both bare and stringified `macro_rules! NAME` forms.
+fn macro_definition_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rest = if trimmed.starts_with('#') {
+        trimmed
+            .trim_start_matches('#')
+            .trim_start()
+            .strip_prefix("define")?
+            .trim_start()
+    } else {
+        trimmed
+            .strip_prefix("macro_rules!")?
+            .trim_start()
+            .trim_start_matches('"')
+    };
+    let name: String = rest.chars().take_while(|c| is_word_char(*c)).collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 /// EMPTY-CATCH / EMPTY-BRANCH: flat code regex over comment/string-stripped lines.
@@ -1222,5 +1302,56 @@ pub mod tests {
 ";
         let findings = run(src);
         assert!(findings_with_rule(&findings, "CEP-LINT-FUNC-BLOCK").is_empty());
+    }
+
+    #[test]
+    fn macro_prefix_flags_unprefixed_definitions_in_both_dialects() {
+        let src = concat!(
+            "#define MAX 4096\n",
+            "#define CEP_TARGET_CACHE_LINE_BYTES 64\n",
+            "#define GUARD_HPP\n",
+            "#undef MAX\n",
+            "macro_rules! inner {\n",
+            "    () => {};\n",
+            "}\n",
+            "macro_rules! CEP_outer {\n",
+            "    () => {};\n",
+            "}\n",
+        );
+        let findings = run(src);
+        let hits = findings_with_rule(&findings, "CEP-LINT-MACRO-PREFIX");
+        assert_eq!(hits.len(), 2, "MAX and inner are violations: {:?}", hits);
+        assert!(hits.iter().any(|f| f.line == 1 && f.message.contains("MAX")));
+        assert!(hits.iter().any(|f| f.line == 5 && f.message.contains("inner")));
+    }
+
+    #[test]
+    fn macro_prefix_accepts_prefixed_guarded_and_stringified_names() {
+        let src = concat!(
+            "#  define CEP_HAS_MDSPAN 1\n",
+            "#define GUARD_HPP\n",
+            "#define CEP_FLAG(X) ((X) & 1)\n",
+            "macro_rules! \"CEP_quoted\" {\n",
+            "    () => {};\n",
+            "}\n",
+        );
+        let findings = run(src);
+        assert!(
+            findings_with_rule(&findings, "CEP-LINT-MACRO-PREFIX").is_empty(),
+            "all four shapes are compliant: {:?}",
+            findings_with_rule(&findings, "CEP-LINT-MACRO-PREFIX")
+        );
+    }
+
+    #[test]
+    fn macro_prefix_ignores_macro_uses_and_comment_mentions() {
+        let src = concat!(
+            "// #define not_a_macro_in_comment\n",
+            "let s = \"macro_rules! not_a_macro_in_string\";\n",
+            "let x = 1;\n",
+            "x\n",
+        );
+        let findings = run(src);
+        assert!(findings_with_rule(&findings, "CEP-LINT-MACRO-PREFIX").is_empty());
     }
 }

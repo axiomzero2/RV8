@@ -50,7 +50,7 @@ fn write(path: &Path, content: &str) {
 fn write_standard(root: &Path) {
     // The shipped config carries the DOC-SYNC rule; the synthetic repo needs a document
     // with one heading per configured rule and the version marker.
-    let mut doc = String::from("# CEP&CC 0.1\n\nVersion: CEP&CC 0.1\n");
+    let mut doc = String::from("# CEP&CC 0.3\n\nVersion: **0.3**\n");
     for id in CONFIGURED_RULE_IDS {
         doc.push_str("\n### Rule ");
         doc.push_str(id);
@@ -66,7 +66,7 @@ fn write_config(root: &Path) -> PathBuf {
     path
 }
 
-const CONFIGURED_RULE_IDS: [&str; 17] = [
+const CONFIGURED_RULE_IDS: [&str; 18] = [
     "CEP-LINT-FILE-HEADER",
     "CEP-LINT-FUNC-BLOCK",
     "CEP-LINT-STATUS-VALUE",
@@ -75,6 +75,7 @@ const CONFIGURED_RULE_IDS: [&str; 17] = [
     "CEP-LINT-PLACEHOLDER-COMMENT",
     "CEP-LINT-PLACEHOLDER-TEXT",
     "CEP-LINT-MAGIC-NUMBER",
+    "CEP-LINT-MACRO-PREFIX",
     "CEP-LINT-HOT-BANNED",
     "CEP-LINT-STUB-BODY",
     "CEP-LINT-EMPTY-CATCH",
@@ -330,5 +331,54 @@ pub mod tests {
     write(&root.join("crates/demo/exempt.rs"), file);
     let (code, stdout, stderr) = run_cli(&root, &["crates"]);
     assert_eq!(code, 0, "stdout: {}\nstderr: {}", stdout, stderr);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn self_test_runs_the_shipped_manifest() {
+    // The 50.6.3 gate end to end: the runner executes every shipped scenario through the
+    // full engine and every exact-count expectation holds.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("manifest.json");
+    let outcome = cep_lint::run_self_test(&manifest).expect("manifest reads and parses");
+    assert!(
+        outcome.failures.is_empty(),
+        "self-test scenarios failed: {:?}",
+        outcome.failures
+    );
+    assert!(outcome.scenarios >= 30, "manifest lost scenarios: {}", outcome.scenarios);
+}
+
+#[test]
+fn self_test_manifest_covers_every_configured_rule() {
+    // The manifest must exercise every rule the configuration ships, so a new check
+    // primitive cannot land without detection evidence.
+    let manifest_text = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("manifest.json"),
+    )
+    .expect("manifest");
+    let config = Config::from_str(SHIPPED_CONFIG).expect("shipped config");
+    for rule in &config.rules {
+        let needle = format!("\"{}\"", rule.id);
+        assert!(
+            manifest_text.contains(&needle),
+            "manifest has no scenario declaring {}",
+            rule.id
+        );
+    }
+}
+
+#[test]
+fn version_banner_names_the_standard() {
+    // 50.1: --version prints tool AND standard versions.
+    let root = scratch("version");
+    write_config(&root);
+    let (code, stdout, _stderr) = run_cli(&root, &["--version"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("cep_lint"), "banner missing tool version: {}", stdout);
+    assert!(stdout.contains("CEP&CC 0.3"), "banner missing standard version: {}", stdout);
     std::fs::remove_dir_all(&root).ok();
 }

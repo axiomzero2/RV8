@@ -47,6 +47,9 @@ pub struct Rule {
     pub suppression_pattern: Option<String>,
     pub icase: bool,
     pub name_pattern: Option<String>,
+    /// Secondary name pattern for macro definitions (the include-guard exemption of the
+    /// macro-prefix policy); a name matching either pattern is compliant.
+    pub guard_pattern: Option<String>,
     /// Vocabulary for status values and allowed-literal checks.
     pub allowed_values: Vec<String>,
     pub statuses: Vec<String>,
@@ -369,6 +372,7 @@ impl Config {
             check("pattern", rule.pattern.as_deref(), rule.icase)?;
             check("suppression_pattern", rule.suppression_pattern.as_deref(), rule.icase)?;
             check("name_pattern", rule.name_pattern.as_deref(), false)?;
+            check("guard_pattern", rule.guard_pattern.as_deref(), false)?;
             check("heading_pattern", rule.heading_pattern.as_deref(), rule.icase)?;
             check("version_pattern", rule.version_pattern.as_deref(), false)?;
         }
@@ -439,6 +443,7 @@ impl Config {
             suppression_pattern: get_string(body, &context, "suppression_pattern")?,
             icase: get_bool(body, &context, "icase")?.unwrap_or(false),
             name_pattern: get_string(body, &context, "name_pattern")?,
+            guard_pattern: get_string(body, &context, "guard_pattern")?,
             allowed_values,
             statuses: get_string_vec(body, &context, "statuses")?,
             suppress_statuses: get_string_vec(body, &context, "suppress_statuses")?,
@@ -600,7 +605,7 @@ pub(crate) mod tests {
     fn parses_shipped_config() {
         let config = Config::from_str(SHIPPED_TEXT).expect("shipped config parses");
         assert_eq!(config.standard_name, "CEP&CC");
-        assert_eq!(config.standard_version, "0.1");
+        assert_eq!(config.standard_version, "0.3");
         assert_eq!(config.fail_on, vec![0, 1]);
         assert_eq!(config.exit_codes.clean, 0);
         assert_eq!(config.exit_codes.findings, 1);
@@ -608,7 +613,7 @@ pub(crate) mod tests {
         assert_eq!(config.exit_codes.usage, 3);
         assert_eq!(config.file_globs.len(), 3);
         assert!(config.file_globs.contains(&"crates/**/*.rs".to_string()));
-        assert_eq!(config.rules.len(), 17);
+        assert_eq!(config.rules.len(), 18);
         let header = config
             .rule_by_check("comment_block_schema", Some("file_header"))
             .expect("file header rule");

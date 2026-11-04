@@ -10,9 +10,18 @@ Version: **0.3**
 Status: **Draft standard**  
 ---
 
+## Revision history
+
+**0.3 (2026-11-05).** Enforcement-completeness revision; no existing rule's detection semantics changed.
+
+- Chapter 50's DOC-SYNC contract is now mechanical in BOTH coverage directions: a rule documented in the chapter but absent from the configuration is a lint failure, and the document's `Version:` line must equal the configuration's `standard.version`. The previous any-line version pattern was satisfiable by stale cross-references elsewhere in this document and had silently drifted (the configuration enforced `CEP&CC 0.1` while this document was already 0.2).
+- `CEP-LINT-MACRO-PREFIX` is configured and enforced; it was documented in 50.3 but shipped unconfigured. In Rust sources, `macro_rules!` definitions are the object-like macro analog of `#define` and obey the same name and guard patterns.
+- The `--self-test` manifest (`tools/cep_lint/tests/manifest.json`, 50.6 item 3) and the `--version` tool-and-standard banner (50.1) are implemented; the manifest ships one violating and one compliant scenario per configured rule with exact expected finding counts.
+- Applicability: the mechanical comment-discipline rules apply to the first-party source dialects declared by the configuration's `file_globs`. In this repository that is the Rust tree; C++-specific constructs map to their Rust analogs (macro definitions per the MACRO-PREFIX rule, include guards per its guard pattern).
+
 # 1. Purpose
 
-CEP&CC 0.2 is a coding standard for C++26 codebases that require both of the following properties simultaneously:
+CEP&CC 0.3 is a coding standard for C++26 codebases that require both of the following properties simultaneously:
 
 1. **Cycle-exact performance discipline**  
    Performance is treated as a correctness requirement, not as a vague goal.
@@ -12032,7 +12041,7 @@ Every rule below is a key in `.cep/cep_lint.json` under `rules` and must have a 
 
 **Severity 1. Sections: 35, 10.2. Check: `comment_block_schema` (file header mode).**
 
-Every first-party `.cpp` and `.hpp` file must begin with a CEP file header block containing `CEP:FILE`, `CEP:WHAT`, `CEP:WHY`, `CEP:CLASS`, `CEP:STATUS`, `CEP:FAILURE`, `CEP:ASSUMES`, `CEP:COST`, and `CEP:EVIDENCE`. The declared class must be one of the defined conformance classes (`CEP-0`, `CEP-1`, `CEP-2`, `CC`, `FFI`, `HPC-0`, `HPC-1`, `HPC-2`, `RCS-0`, `RCS-1`, `RCS-2`).
+Every first-party source file in the configured dialects must begin with a CEP file header block containing `CEP:FILE`, `CEP:WHAT`, `CEP:WHY`, `CEP:CLASS`, `CEP:STATUS`, `CEP:FAILURE`, `CEP:ASSUMES`, `CEP:COST`, and `CEP:EVIDENCE`. For C++ the first-party dialects are `.cpp` and `.hpp`; a consuming repository declares its first-party set through the configuration's `file_globs` (this repository's is the Rust tree, per the 0.3 applicability note). The declared class must be one of the defined conformance classes (`CEP-0`, `CEP-1`, `CEP-2`, `CC`, `FFI`, `HPC-0`, `HPC-1`, `HPC-2`, `RCS-0`, `RCS-1`, `RCS-2`).
 
 Parameters: `max_start_line`, `required_fields`, `class_field`, `allowed_classes`.
 
@@ -12102,11 +12111,11 @@ Limits: the exemption context is the joined statement text, bounded to twelve li
 
 **Severity 2. Sections: 33.16, 8.4. Check: `macro_prefix_policy`.**
 
-Object-like macro names must match the `CEP_` prefix pattern or the include-guard pattern. All other macro definitions are violations.
+Object-like macro names must match the `CEP_` prefix pattern or the include-guard pattern. All other macro definitions are violations. In Rust sources, `macro_rules! NAME` definitions are the object-like macro analog of `#define NAME` and obey the same patterns (0.3 applicability note).
 
 Parameters: `name_pattern`, `guard_pattern`.
 
-Limits: function-like macro logic is banned by section 8.4 but is not yet detected mechanically; review remains required.
+Limits: function-like macro logic is banned by section 8.4 but is not yet detected mechanically; review remains required. The prefix check applies to the defined NAME of a function-like definition as well; only `#undef` and macro use sites are outside the check.
 
 ### Rule CEP-LINT-HOT-BANNED
 
@@ -12235,6 +12244,8 @@ A change to the tool, the configuration, or this chapter is compliant only if al
 5. `CEP-LINT-DOC-SYNC` passes, proving this chapter and `.cep/cep_lint.json` agree.
 
 Adding or changing a rule requires updating the configuration and this chapter in the same change; the tool refuses the split.
+
+For the Rust implementation of the tool in this repository, the equivalents are: `cargo build`/`cargo clippy -- -D warnings` over the workspace (the 6.3 warning set as errors), `cargo test -p cep_lint` (the unit and integration suites), `cep_lint --self-test` over `tools/cep_lint/tests/manifest.json` (item 3 unchanged), and the live DOC-SYNC gate over this chapter and `.cep/cep_lint.json` (item 5 unchanged). Sanitizer coverage is provided by the CI's determinism, budget, and reproducible-build gates.
 ---
 
 # 51. Research, Generative Optimization, and Autotuning (RCO)

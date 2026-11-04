@@ -23,11 +23,14 @@
 //   by named constants (38.12, 38.13).
 
 use crate::config::{any_glob_match, Config, Rule};
+use crate::json;
 use crate::regexlite::Regex;
 use crate::rules::{self, Finding};
 use crate::scan::{self, MAX_FILE_BYTES};
 use crate::waivers;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 /// Upper bound on considered files per run; exceeding it yields a budget finding.
 pub const MAX_FILES: usize = 50_000;
@@ -414,17 +417,25 @@ fn discover_root(config_path: Option<&Path>) -> Result<PathBuf, LintError> {
 }
 
 /// CEP:WHAT: DOC-SYNC evaluation over the standard document text: every configured rule id
-///   must be documented exactly once and the version marker must be present.
-/// CEP:WHY: Law 8 (no stale documentation) is enforced mechanically; the standard and the
-///   config must agree or the run fails.
+///   must be documented exactly once, every documented rule id must be configured, and the
+///   document's `Version:` line must equal the configuration's standard.version.
+/// CEP:WHY: Law 8 (no stale documentation) is enforced mechanically in BOTH coverage
+///   directions plus the version contract; the standard and the config must agree or the
+///   run fails.  The version check is anchored to the `Version:` metadata line because the
+///   previous any-line pattern search was satisfied by a stale cross-reference mentioning
+///   an old version elsewhere in the document (the CEP&CC 0.2/0.1 drift defect).
 /// CEP:STATUS: complete
-/// CEP:FAILURE: findings name duplicate or missing rule headings and a missing version
-///   marker; pattern-compile failures degrade to no findings (already rejected at config
+/// CEP:FAILURE: findings name duplicate or missing rule headings, documented rules without
+///   a configuration entry, and a missing or mismatched `Version:` line; an optional
+///   version_pattern (when configured) additionally requires a matching line anywhere;
+///   pattern-compile failures degrade to no findings (already rejected at config
 ///   validation).
-/// CEP:ASSUMES: the document uses `### Rule <ID>` headings and a version line.
+/// CEP:ASSUMES: the document uses `### Rule <ID>` headings and carries the version in a
+///   `Version:` metadata line (markdown emphasis is trimmed).
 /// CEP:COST: O(document lines) per configured doc-sync rule.
-/// CEP:EVIDENCE: engine::tests pin the shipped document/config agreement and the
-///   missing-heading and missing-version failure paths.
+/// CEP:EVIDENCE: engine::tests pin the shipped document/config agreement, both coverage
+///   directions, heading uniqueness, and the version-equality and missing-version failure
+///   paths.
 pub fn doc_sync(rule: &Rule, config: &Config, doc_path: &str, text: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let heading_pattern = match rule.heading_pattern.as_deref() {
@@ -479,6 +490,52 @@ pub fn doc_sync(rule: &Rule, config: &Config, doc_path: &str, text: &str) -> Vec
             ),
         ));
     }
+    // The reverse coverage direction: every documented rule must exist in the
+    // configuration.  A rule documented here but unconfigured is exactly the Law 8
+    // drift this rule exists to catch.
+    let mut unconfigured: Vec<&str> = Vec::new();
+    for id in &ids {
+        if !config.rules.iter().any(|configured| &configured.id == id) {
+            unconfigured.push(id);
+        }
+    }
+    unconfigured.sort();
+    if !unconfigured.is_empty() {
+        findings.push(Finding::new(
+            rule.severity,
+            doc_path,
+            1,
+            &rule.id,
+            format!(
+                "documented rules without a configuration entry: {}",
+                unconfigured.join(", ")
+            ),
+        ));
+    }
+    // The version contract: the document's `Version:` metadata line must equal the
+    // configuration's standard.version.
+    if !config.standard_version.is_empty() {
+        match declared_version(text) {
+            Some(version) if version == config.standard_version => {}
+            Some(version) => findings.push(Finding::new(
+                rule.severity,
+                doc_path,
+                1,
+                &rule.id,
+                format!(
+                    "document {} version {} does not equal the configured standard.version {}",
+                    doc_path, version, config.standard_version
+                ),
+            )),
+            None => findings.push(Finding::new(
+                rule.severity,
+                doc_path,
+                1,
+                &rule.id,
+                format!("document {} has no 'Version:' line", doc_path),
+            )),
+        }
+    }
     if let Some(version_pattern) = rule.version_pattern.as_deref() {
         let found = Regex::new(version_pattern, false)
             .map(|re| text.lines().any(|line| re.is_match(line)))
@@ -497,6 +554,232 @@ pub fn doc_sync(rule: &Rule, config: &Config, doc_path: &str, text: &str) -> Vec
         }
     }
     findings
+}
+
+/// Extracts the version from the document's first `Version:` metadata line, trimming
+/// markdown emphasis and surrounding whitespace: `Version: **0.3**` yields `0.3`.
+fn declared_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let trimmed = trimmed
+            .strip_prefix('#')
+            .map(str::trim_start)
+            .unwrap_or(trimmed);
+        if let Some(rest) = trimmed.strip_prefix("Version:") {
+            let value = rest.trim().trim_matches('*').trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// CEP:WHAT: Locates the repository root for the CLI the same way the engine does: the
+///   nearest ancestor (from the working directory) containing a `.cep` directory.
+/// CEP:WHY: The --self-test flag must find the shipped manifest without a config flag.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: Err outside a repository (mapped to the bootstrap exit code).
+/// CEP:ASSUMES: same discovery contract as LintEngine::load.
+/// CEP:COST: O(depth) stat calls.
+/// CEP:EVIDENCE: integration::self_test_runs_the_shipped_manifest drives it end to end.
+pub fn find_repo_root() -> Result<PathBuf, LintError> {
+    discover_root(None)
+}
+
+/// CEP:WHAT: The --version banner: the tool version plus the enforced standard identity
+///   from the effective configuration (tool version alone when no repository is found).
+/// CEP:WHY: Section 50.1 requires --version to print tool AND standard versions, so a
+///   run's enforcement target is visible in logs.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; falls back to the tool-only banner outside a repository.
+/// CEP:ASSUMES: the default configuration names the standard the run would enforce.
+/// CEP:COST: one config load.
+/// CEP:EVIDENCE: integration::version_banner_names_the_standard.
+pub fn version_banner(config_path: Option<&Path>) -> String {
+    match LintEngine::load(config_path) {
+        Ok(engine) => format!(
+            "cep_lint {} (enforcing {} {})",
+            crate::VERSION,
+            engine.config().standard_name,
+            engine.config().standard_version
+        ),
+        Err(_) => format!("cep_lint {} ({})", crate::VERSION, crate::SUMMARY),
+    }
+}
+
+/// CEP:WHAT: Result of the self-test manifest run: the scenario count and one failure
+///   string per failed scenario (empty means every scenario matched its exact counts).
+/// CEP:WHY: The 50.6.3 gate needs a machine-checkable outcome the CLI maps to exit codes.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none; a plain data carrier.
+/// CEP:ASSUMES: scenarios ran in manifest order; failures carry the scenario name.
+/// CEP:COST: one word per scenario.
+/// CEP:EVIDENCE: integration::self_test_runs_the_shipped_manifest and the failure-path
+///   tests in engine::tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfTestOutcome {
+    pub scenarios: usize,
+    pub failures: Vec<String>,
+}
+
+/// CEP:WHAT: The self-test manifest runner (50.6.3): every scenario writes its fixture
+///   files into a fresh temporary root, lints them through the FULL engine (rules, doc
+///   sync, waiver application), and requires the exact per-rule finding counts it
+///   declares; undeclared rules must produce zero findings.
+/// CEP:WHY: The tool contract requires `--self-test` to prove every configured check
+///   primitive still detects what the standard says it detects, with exact counts.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: Err for an unreadable or unparseable manifest (bootstrap); scenario
+///   failures (config rejection, fixture write failure, count mismatch) are collected in
+///   SelfTestOutcome.failures and mapped to the findings exit code.
+/// CEP:ASSUMES: manifest schema: { scenarios: [ { name, config (JSON text), files
+///   (name -> source), doc?: { path, text }, expect_findings: { RULE: exact count } } ] };
+///   scenario file_globs must match their fixture names ("**/*" is simplest).
+/// CEP:COST: one temporary directory per scenario, removed after the scenario.
+/// CEP:EVIDENCE: tools/cep_lint/tests/manifest.json scenarios; integration and engine
+///   tests drive the runner directly.
+pub fn run_self_test(manifest_path: &Path) -> Result<SelfTestOutcome, LintError> {
+    let text = std::fs::read_to_string(manifest_path).map_err(|e| {
+        LintError::new(format!(
+            "cannot read self-test manifest {}: {}",
+            manifest_path.display(),
+            e
+        ))
+    })?;
+    let manifest = json::parse(&text).map_err(|e| {
+        LintError::new(format!("self-test manifest is not valid JSON: {}", e.message))
+    })?;
+    let scenarios = manifest
+        .get("scenarios")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| LintError::new("self-test manifest has no scenarios array"))?;
+    let mut outcome = SelfTestOutcome {
+        scenarios: scenarios.len(),
+        failures: Vec::new(),
+    };
+    for (index, scenario) in scenarios.iter().enumerate() {
+        let name = scenario
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Err(detail) = run_scenario(index, scenario) {
+            outcome
+                .failures
+                .push(format!("scenario '{}' ({})", name, detail));
+        }
+    }
+    Ok(outcome)
+}
+
+/// Runs one self-test scenario; the error string is the failure detail.
+fn run_scenario(index: usize, scenario: &json::Value) -> Result<(), String> {
+    let config_text = scenario
+        .get("config")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "scenario has no config text".to_string())?;
+    let config =
+        Config::from_str(config_text).map_err(|e| format!("config rejected: {}", e.message))?;
+    let files = match scenario.get("files") {
+        Some(json::Value::Object(members)) => members,
+        _ => return Err("scenario has no files object".to_string()),
+    };
+    if files.is_empty() {
+        return Err("scenario has no fixture files".to_string());
+    }
+    let root = std::env::temp_dir().join(format!(
+        "cep_lint_selftest_{}_{}",
+        std::process::id(),
+        index
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root)
+        .map_err(|e| format!("cannot create temporary root {}: {}", root.display(), e))?;
+    let mut result = Ok(());
+    {
+        for (name, content) in files {
+            let body = match content.as_str() {
+                Some(body) => body,
+                None => {
+                    result = Err(format!("fixture {} is not a string", name));
+                    break;
+                }
+            };
+            let path = root.join(name);
+            if let Some(parent) = path.parent() {
+                if std::fs::create_dir_all(parent).is_err() {
+                    result = Err(format!("cannot create parent of fixture {}", name));
+                    break;
+                }
+            }
+            if let Err(e) = std::fs::write(&path, body) {
+                result = Err(format!("cannot write fixture {}: {}", name, e));
+                break;
+            }
+        }
+        if result.is_ok() {
+            if let Some(doc) = scenario.get("doc") {
+                let doc_path = doc.get("path").and_then(|value| value.as_str()).unwrap_or("");
+                let doc_text = doc.get("text").and_then(|value| value.as_str()).unwrap_or("");
+                if doc_path.is_empty()
+                    || std::fs::write(root.join(doc_path), doc_text).is_err()
+                {
+                    result = Err("scenario doc fixture is incomplete".to_string());
+                }
+            }
+        }
+    }
+    if result.is_ok() {
+        match LintEngine::with_parts(config, root.clone()).run(std::slice::from_ref(&root)) {
+            Ok(outcome) => {
+                let mut actual: BTreeMap<&str, usize> = BTreeMap::new();
+                for finding in &outcome.findings {
+                    *actual.entry(finding.rule.as_str()).or_insert(0) += 1;
+                }
+                let expected = match scenario.get("expect_findings") {
+                    Some(json::Value::Object(members)) => members,
+                    _ => return finish_scenario(root, Err("scenario has no expect_findings object".to_string())),
+                };
+                for (rule_id, count) in expected {
+                    let want = match count.as_u64() {
+                        Some(want) => want as usize,
+                        None => {
+                            result = Err(format!("expected count for {} is not an integer", rule_id));
+                            break;
+                        }
+                    };
+                    let got = actual.get(rule_id.as_str()).copied().unwrap_or(0);
+                    if got != want {
+                        result = Err(format!(
+                            "{} expected {} finding(s), got {} (actual findings: {:?})",
+                            rule_id, want, got, actual
+                        ));
+                        break;
+                    }
+                }
+                if result.is_ok() {
+                    for (rule_id, count) in &actual {
+                        if !expected.iter().any(|(name, _)| name == rule_id) {
+                            result = Err(format!(
+                                "unexpected findings from {} ({})",
+                                rule_id, count
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => result = Err(format!("engine run failed: {}", e.message)),
+        }
+    }
+    finish_scenario(root, result)
+}
+
+/// Removes the scenario root and passes the result through.
+fn finish_scenario(root: PathBuf, result: Result<(), String>) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(&root);
+    result
 }
 
 /// CEP:WHAT: Free-function entry point from the tool contract: lint paths against a config
@@ -628,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn doc_sync_flags_missing_heading_and_version() {
+    fn doc_sync_flags_missing_heading_and_version_mismatch() {
         let root = manifest_root();
         let config = Config::from_file(&root.join(".cep").join("cep_lint.json")).expect("config");
         let rule = config
@@ -639,6 +922,174 @@ mod tests {
         let findings = doc_sync(rule, &config, "doc.md", "# small doc\nVersion: 9.9\n");
         assert!(!findings.is_empty());
         assert!(findings.iter().any(|f| f.message.contains("without a '### Rule' heading")));
-        assert!(findings.iter().any(|f| f.message.contains("version pattern")));
+        assert!(findings
+            .iter()
+            .any(|f| f.message.contains("does not equal the configured standard.version")));
+    }
+
+    /// Synthetic doc-sync config: one trivial code rule plus the doc-sync rule.
+    fn config_with_doc_sync(version: &str, version_pattern: Option<&str>) -> Config {
+        let pattern_part = match version_pattern {
+            Some(p) => format!(", \"version_pattern\": \"{}\"", p),
+            None => String::new(),
+        };
+        let text = format!(
+            "{{\"standard\": {{\"name\": \"CEP&CC\", \"version\": \"{}\", \"source\": \"standard.md\"}}, \
+             \"file_globs\": [\"**/*\"], \"rules\": {{\
+             \"CEP-LINT-A\": {{\"severity\": 2, \"check\": \"comment_regex\", \"pattern\": \"\\\\bTODO\\\\b\"}}, \
+             \"CEP-LINT-DOC-SYNC\": {{\"severity\": 1, \"check\": \"doc_rule_coverage\", \
+             \"doc_path\": \"doc.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"{}}}}}}}",
+            version, pattern_part
+        );
+        Config::from_str(&text).expect("synthetic config")
+    }
+
+    const AGREEMENT_DOC: &str = "\
+# T
+Version: **0.2**
+### Rule CEP-LINT-A
+### Rule CEP-LINT-DOC-SYNC
+";
+
+    #[test]
+    fn doc_sync_full_agreement_is_clean() {
+        let config = config_with_doc_sync("0.2", None);
+        let rule = config
+            .rules_with_check("doc_rule_coverage")
+            .into_iter()
+            .next()
+            .expect("doc rule");
+        assert!(doc_sync(rule, &config, "doc.md", AGREEMENT_DOC).is_empty());
+    }
+
+    #[test]
+    fn doc_sync_reverse_direction_flags_documented_rules_without_configuration() {
+        let config = config_with_doc_sync("0.2", None);
+        let rule = config
+            .rules_with_check("doc_rule_coverage")
+            .into_iter()
+            .next()
+            .expect("doc rule");
+        let text = AGREEMENT_DOC.replace(
+            "### Rule CEP-LINT-DOC-SYNC",
+            "### Rule CEP-LINT-DOC-SYNC\n### Rule CEP-LINT-B",
+        );
+        let findings = doc_sync(rule, &config, "doc.md", &text);
+        assert!(findings
+            .iter()
+            .any(|f| f.message.contains("documented rules without a configuration entry")
+                && f.message.contains("CEP-LINT-B")),
+            "{:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn doc_sync_version_equality_ignores_stale_cross_references() {
+        // The document carries a stale narrative mention of an old version; the version
+        // contract reads the `Version:` line, so agreement still holds.  This is the
+        // regression for the 0.1/0.2 drift: an any-line pattern search used to be
+        // satisfied by exactly such a mention while the document had moved on.
+        let config = config_with_doc_sync("0.2", None);
+        let rule = config
+            .rules_with_check("doc_rule_coverage")
+            .into_iter()
+            .next()
+            .expect("doc rule");
+        let text = AGREEMENT_DOC
+            .replace("### Rule CEP-LINT-A", "narrative: CEP&CC 0.1 introduced chapters.\n### Rule CEP-LINT-A");
+        let findings = doc_sync(rule, &config, "doc.md", &text);
+        assert!(
+            !findings.iter().any(|f| f.message.contains("does not equal")),
+            "{:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn doc_sync_flags_version_mismatch_despite_stale_reference() {
+        let config = config_with_doc_sync("0.3", None);
+        let rule = config
+            .rules_with_check("doc_rule_coverage")
+            .into_iter()
+            .next()
+            .expect("doc rule");
+        let text = AGREEMENT_DOC
+            .replace("### Rule CEP-LINT-A", "narrative: CEP&CC 0.1 introduced chapters.\n### Rule CEP-LINT-A");
+        let findings = doc_sync(rule, &config, "doc.md", &text);
+        assert!(findings
+            .iter()
+            .any(|f| f.message.contains("version 0.2 does not equal the configured standard.version 0.3")),
+            "{:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn doc_sync_version_pattern_remains_supported_when_configured() {
+        let config = config_with_doc_sync("0.2", Some("CEP&CC 0\\\\.1"));
+        let rule = config
+            .rules_with_check("doc_rule_coverage")
+            .into_iter()
+            .next()
+            .expect("doc rule");
+        // The stale mention satisfies the optional pattern; no pattern finding appears.
+        let text = AGREEMENT_DOC
+            .replace("### Rule CEP-LINT-A", "narrative: CEP&CC 0.1 introduced chapters.\n### Rule CEP-LINT-A");
+        let findings = doc_sync(rule, &config, "doc.md", &text);
+        assert!(
+            !findings.iter().any(|f| f.message.contains("version pattern")),
+            "{:?}",
+            findings
+        );
+        // Without any matching line the optional pattern fires on top of the equality check.
+        let findings = doc_sync(rule, &config, "doc.md", AGREEMENT_DOC);
+        assert!(findings
+            .iter()
+            .any(|f| f.message.contains("no line matching the version pattern")),
+            "{:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn declared_version_trims_markdown_emphasis() {
+        assert_eq!(declared_version("# T\nVersion: **0.3**\n"), Some("0.3".to_string()));
+        assert_eq!(declared_version("Version: 0.3\n"), Some("0.3".to_string()));
+        assert_eq!(declared_version("# Version: **0.4**\n"), Some("0.4".to_string()));
+        assert_eq!(declared_version("# no version here\n"), None);
+    }
+
+    #[test]
+    fn self_test_runner_accepts_exact_counts_and_flags_mismatches() {
+        let dir = std::env::temp_dir().join(format!(
+            "cep_lint_manifest_engine_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let scenario_config = "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.3\",\"source\":\"x\"},\
+             \"file_globs\":[\"**/*\",\"*\"],\
+             \"rules\":{\"CEP-LINT-TODO\":{\"severity\":1,\"check\":\"comment_regex\",\
+             \"pattern\":\"\\\\b(TODO|FIXME)\\\\b\"}}}";
+        let escaped = scenario_config.replace('\\', "\\\\").replace('"', "\\\"");
+        let manifest = format!(
+            "{{\"scenarios\": [\
+             {{\"name\": \"todo_found\", \"config\": \"{cfg}\", \
+             \"files\": {{\"a.rs\": \"// TODO fix\\n\"}}, \
+             \"expect_findings\": {{\"CEP-LINT-TODO\": 1}}}}, \
+             {{\"name\": \"bad_count\", \"config\": \"{cfg}\", \
+             \"files\": {{\"a.rs\": \"// TODO fix\\n\"}}, \
+             \"expect_findings\": {{\"CEP-LINT-TODO\": 2}}}}]}}",
+            cfg = escaped
+        );
+        let path = dir.join("manifest.json");
+        std::fs::write(&path, &manifest).expect("manifest");
+        let outcome = run_self_test(&path).expect("manifest runs");
+        assert_eq!(outcome.scenarios, 2);
+        assert_eq!(outcome.failures.len(), 1, "{:?}", outcome.failures);
+        assert!(outcome.failures[0].contains("bad_count"), "{:?}", outcome.failures);
+        assert!(outcome.failures[0].contains("expected 2 finding(s), got 1"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

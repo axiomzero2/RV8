@@ -1,7 +1,9 @@
 // CEP:FILE: tools/cep_lint/src/main.rs
 // CEP:WHAT: Command-line entry point: `cep_lint [--config <path>] <paths...>` lints the
 //   given files or directories against the configuration and reports findings plus a
-//   summary, exiting clean, findings, bootstrap, or usage per the configured codes.
+//   summary; `--self-test, -t` runs the shipped manifest scenarios; `--version, -v` prints
+//   tool and standard versions; exiting clean, findings, bootstrap, or usage per the
+//   configured codes.
 // CEP:WHY: The CI gate runs this binary over crates/tools/tests; exit-code honesty is the
 //   product: bootstrap failures must be distinguishable from real violations.
 // CEP:CLASS: CEP-2
@@ -30,6 +32,8 @@ fn main() {
 fn run(args: &[String]) -> i32 {
     let mut config_path: Option<PathBuf> = None;
     let mut paths: Vec<PathBuf> = Vec::new();
+    let mut want_version = false;
+    let mut want_self_test = false;
     let mut index = 0usize;
     while index < args.len() {
         let arg = args[index].as_str();
@@ -39,8 +43,12 @@ fn run(args: &[String]) -> i32 {
                 return cep_lint::config::ExitCodes::default().clean;
             }
             "--version" | "-v" => {
-                println!("cep_lint {} ({})", cep_lint::VERSION, cep_lint::SUMMARY);
-                return cep_lint::config::ExitCodes::default().clean;
+                want_version = true;
+                index += 1;
+            }
+            "--self-test" | "-t" => {
+                want_self_test = true;
+                index += 1;
             }
             "--config" | "-c" => {
                 let value = match args.get(index + 1) {
@@ -64,6 +72,13 @@ fn run(args: &[String]) -> i32 {
                 index += 1;
             }
         }
+    }
+    if want_version {
+        println!("{}", cep_lint::version_banner(config_path.as_deref()));
+        return cep_lint::config::ExitCodes::default().clean;
+    }
+    if want_self_test {
+        return run_self_test_gate();
     }
     if paths.is_empty() {
         eprintln!("cep_lint: usage error: at least one path is required");
@@ -97,6 +112,53 @@ fn run(args: &[String]) -> i32 {
         codes.findings
     } else {
         codes.clean
+    }
+}
+
+/// CEP:WHAT: The --self-test gate: runs every scenario in the shipped manifest through the
+///   full engine and exits clean only when every scenario matched its exact counts.
+/// CEP:WHY: Section 50.6.3 requires the tool to prove its own detection behavior; the CLI
+///   maps manifest errors to the bootstrap code and scenario failures to the findings code.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: prints per-scenario failures and exits findings; manifest bootstrap errors
+///   exit bootstrap.
+/// CEP:ASSUMES: the manifest lives at tools/cep_lint/tests/manifest.json under the
+///   repository root (section 50.1).
+/// CEP:COST: one engine run per scenario.
+/// CEP:EVIDENCE: integration::self_test_runs_the_shipped_manifest.
+fn run_self_test_gate() -> i32 {
+    let codes = cep_lint::config::ExitCodes::default();
+    let manifest = match cep_lint::find_repo_root() {
+        Ok(root) => root.join("tools").join("cep_lint").join("tests").join("manifest.json"),
+        Err(e) => {
+            eprintln!("cep_lint: bootstrap error: {}", e);
+            return codes.bootstrap;
+        }
+    };
+    match cep_lint::run_self_test(&manifest) {
+        Ok(outcome) => {
+            for failure in &outcome.failures {
+                println!("cep_lint: self-test FAIL: {}", failure);
+            }
+            if outcome.failures.is_empty() {
+                println!(
+                    "cep_lint: self-test: all {} scenario(s) passed",
+                    outcome.scenarios
+                );
+                codes.clean
+            } else {
+                println!(
+                    "cep_lint: self-test: {} of {} scenario(s) failed",
+                    outcome.failures.len(),
+                    outcome.scenarios
+                );
+                codes.findings
+            }
+        }
+        Err(e) => {
+            eprintln!("cep_lint: bootstrap error: {}", e);
+            codes.bootstrap
+        }
     }
 }
 
@@ -135,7 +197,7 @@ fn summary(files: usize, findings: &[Finding]) -> String {
 
 fn print_usage() {
     println!(
-        "cep_lint {} - {}\n\nUSAGE:\n    cep_lint [--config <path>] <paths...>\n\nOPTIONS:\n    --config, -c <path>  lint configuration (default: .cep/cep_lint.json\n                         under the repository root found from the working directory)\n    --help, -h           show this help\n    --version, -v        print version\n\nEXIT CODES:\n    0  no failing findings\n    1  findings at a severity listed in fail_on\n    2  bootstrap failure (config missing or unparseable, path walk failure)\n    3  command-line usage error",
+        "cep_lint {} - {}\n\nUSAGE:\n    cep_lint [--config <path>] <paths...>\n\nOPTIONS:\n    --config, -c <path>  lint configuration (default: .cep/cep_lint.json\n                         under the repository root found from the working directory)\n    --self-test, -t      run the self-test manifest\n                         (tools/cep_lint/tests/manifest.json) and exit\n    --help, -h           show this help\n    --version, -v        print tool and standard versions\n\nEXIT CODES:\n    0  no failing findings\n    1  findings at a severity listed in fail_on\n    2  bootstrap failure (config missing or unparseable, path walk failure)\n    3  command-line usage error",
         cep_lint::VERSION,
         cep_lint::SUMMARY
     );
