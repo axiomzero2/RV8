@@ -1,12 +1,12 @@
 
-# CEP&CC 0.2
+# CEP&CC 0.3
 
 ## Cycle-Exact Performance & Clean Code
 
 ### Psychopathic Tier
 
 Target dialect: **C++26**  
-Version: **0.2**  
+Version: **0.3**  
 Status: **Draft standard**  
 ---
 
