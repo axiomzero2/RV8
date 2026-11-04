@@ -210,10 +210,14 @@ def BarrierElidableHB (hb : Nat → Nat → Prop) (a b : Nat) : Prop :=
 def LockElidable (conflict : Nat → Nat → Prop) (s : Nat) : Prop :=
   ∀ x y, s ≤ x → x ≤ y → ¬ conflict x y
 
-/-- #110: atomic lowering: the atomic fetch-op semantics is the
-    unreorderable read-modify-write; the mathematical object is the
-    sequential-per-location semantics the target must provide. -/
-def AtomicSem (_ld _st : Nat → Prop) : Prop := True
+/-- #110: atomic lowering: the atomic fetch-op is the single-step
+    read-modify-write — the store of an atomic access never happens
+    without the paired load at the same program point, so no interleaving
+    window exists between the read and the write. A lowering that splits
+    the pair (a store point whose load lives elsewhere) violates this
+    sequential-per-location contract. -/
+def AtomicSem (ld st : Nat → Prop) : Prop :=
+  ∀ p, st p → ld p
 
 /-! ## #111-#113 Placement. -/
 

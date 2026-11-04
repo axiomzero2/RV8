@@ -54,8 +54,14 @@ structure Specialization where
   static : List (VReg × Word)
   residual : Prog
 
-def PartialEvalLegality (_f _g : Prog → Machine → Outcome) (_σ : Specialization) : Prop :=
-  True -- the mix-line theorem is stated against the extracted evaluator; see frame
+/-- #141: mix-line legality — the partial-evaluation soundness contract:
+    on every machine state that binds the static inputs as `σ.static`
+    prescribes, running the residual program is observationally equivalent,
+    at every fuel, to running the original program. The specialization
+    removed exactly the static computation and nothing else. -/
+def PartialEvalLegality (orig : Prog) (σ : Specialization) : Prop :=
+  ∀ n m, (∀ v w, σ.static.lookup v = some w → m.regs v = some w) →
+    ObsEquiv (run n orig m) (run n σ.residual m)
 
 /-- #142: supercompilation: drive the program by context: the driving
     relation `step` over configurations, with whistle-based folding; the

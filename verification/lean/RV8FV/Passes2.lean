@@ -603,11 +603,28 @@ def DivSafe (o : Binop) (b : Arg) : Prop :=
   | .udiv, .imm w => w ≠ 0
   | _, _ => True
 
-/-- #66: an overflow check is redundant when the wrapping result equals the
-    wrapped mathematical result by construction — always true on this model
-    (the word IS the wrapping domain), so the check the source-level
-    semantics requires is discharged by `wrap`. -/
-def OverflowFree (_a _b : Word) : Prop := True
+/-- #66: an overflow check on `a ∘ b` is redundant when the operation
+    cannot trap on this model: `Binop.eval` yields a value for every
+    operation except `udiv` by zero, because the word IS the wrapping
+    domain — the wrapped result is the definition (`wadd a b` is
+    `wrap (a + b)`), so the source-level overflow condition is
+    unobservable. The totality of the three overflowing operations is
+    machine-checked below. -/
+def OverflowFree (o : Binop) (a b : Word) : Prop :=
+  o.eval a b ≠ none
+
+/-- #66 (FV-0): addition is total on the wrapping domain — no overflow
+    trap exists to remove. -/
+theorem overflowFree_add (a b : Word) : OverflowFree .add a b := by
+  simp [OverflowFree, Binop.eval]
+
+/-- #66 (FV-0): subtraction is total on the wrapping domain. -/
+theorem overflowFree_sub (a b : Word) : OverflowFree .sub a b := by
+  simp [OverflowFree, Binop.eval]
+
+/-- #66 (FV-0): multiplication is total on the wrapping domain. -/
+theorem overflowFree_mul (a b : Word) : OverflowFree .mul a b := by
+  simp [OverflowFree, Binop.eval]
 
 /-- Indexed map over instructions. -/
 def mapWithIdx : List Instr → Nat → (Nat → Instr → Instr) → List Instr
