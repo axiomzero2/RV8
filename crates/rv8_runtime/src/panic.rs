@@ -156,10 +156,27 @@ pub mod tests {
     /// CEP:WHY: Test fixture plumbing for a fn(&str) callback, which cannot capture.
     /// CEP:STATUS: complete
     /// CEP:FAILURE: none
-    /// CEP:ASSUMES: single-threaded test execution for these cases.
+    /// CEP:ASSUMES: every test that touches the process-global console locks
+    ///   CONSOLE_MUX first; lib tests run on parallel threads.
     /// CEP:COST: test-only.
     /// CEP:EVIDENCE: this module.
     static SINK: AtomicUsize = AtomicUsize::new(0);
+
+    /// CEP:WHAT: Serializes every console-using test in this module.
+    /// CEP:WHY: `set_console` registers a process-global writer, and cargo runs
+    ///   lib tests on parallel threads: without this mux, one test's
+    ///   install_sink could clobber the console between another test's writes
+    ///   (observed as a ~10-20% flake: `console_callback_receives_text` saw
+    ///   ["hello"] instead of ["hello", "world"]).  The mux makes the
+    ///   install/write/assert/remove sequence atomic per test without weakening
+    ///   any assertion.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: none
+    /// CEP:ASSUMES: poisoning is deliberately ignored (a failed assert must not
+    ///   cascade into the sibling test's lock).
+    /// CEP:COST: test-only.
+    /// CEP:EVIDENCE: this module; the flake it fixes is documented in the ticket.
+    static CONSOLE_MUX: Mutex<()> = Mutex::new(());
 
     /// CEP:WHAT: Installs the capturing console and returns the shared sink.
     /// CEP:WHY: Shared fixture for the two panic-path tests.
@@ -193,6 +210,7 @@ pub mod tests {
     /// CEP:EVIDENCE: this test.
     #[test]
     fn console_callback_receives_text() {
+        let _mux = CONSOLE_MUX.lock().unwrap_or_else(|e| e.into_inner());
         let sink = install_sink();
         console_write("hello");
         console_write("world");
@@ -215,6 +233,7 @@ pub mod tests {
     /// CEP:EVIDENCE: this test.
     #[test]
     fn panic_report_reaches_console() {
+        let _mux = CONSOLE_MUX.lock().unwrap_or_else(|e| e.into_inner());
         let sink = install_sink();
         report_panic("unwrap on None");
         assert_eq!(

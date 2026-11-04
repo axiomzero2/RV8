@@ -75,8 +75,11 @@ jobs:
           cd verification/lean
           lake build RV8FV rv8fvtest
           lake test
-          if grep -rn "sorry" RV8FV RV8FV.lean SmokeMain.lean; then
-            echo "FV-0 violation: sorry found (CEP&CC 54.3.1)"
-            exit 1
-          fi
+          # The source-level zero-sorry gate: a Lean-aware scanner, not a naive
+          # grep — it strips comments and string literals (so Audit.lean's own
+          # documentation of the gate cannot false-positive) and flags
+          # sorry/sorryAx/mkSorry tokens in code (see tools/fv_zero_sorry.py).
+          # The hard gate remains the machine axiom audit inside Audit.lean,
+          # which already failed the build above on any imported sorryAx.
+          python3 ../../tools/fv_zero_sorry.py RV8FV RV8FV.lean SmokeMain.lean
           echo "formal verification: zero sorry, all theorems compiled, smoke tests passed"
