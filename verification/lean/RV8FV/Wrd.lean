@@ -123,6 +123,30 @@ theorem wxor_invol (a b : Word) : wxor (wxor a b) b = a := by
 theorem wand_zero (a : Word) : wand a 0 = 0 := Nat.and_zero a
 theorem zero_wand (a : Word) : wand 0 a = 0 := Nat.zero_and a
 
+/-- The mask-subsumption law: if `m1 & m2 = m1` (every bit of the inner
+    mask `m1` is also set in the outer mask `m2`), then masking by `m1`
+    first makes the outer mask a no-op: `(v & m1) & m2 = v & m1`. This is
+    the value identity of truncation elimination (catalog pass #69).
+    Machine-checked over the per-bit `testBit` characterization of land. -/
+theorem wand_submask (v m1 m2 : Word) (h : Nat.land m1 m2 = m1) :
+    wand (wand v m1) m2 = wand v m1 := by
+  show Nat.land (Nat.land v m1) m2 = Nat.land v m1
+  apply Nat.eq_of_testBit_eq
+  intro i
+  show ((v &&& m1) &&& m2).testBit i = (v &&& m1).testBit i
+  rw [Nat.testBit_and, Nat.testBit_and]
+  cases hb1 : Nat.testBit m1 i with
+  | false => simp
+  | true =>
+    have hband : Nat.testBit (m1 &&& m2) i = Nat.testBit m1 i := by
+      rw [show (m1 &&& m2) = Nat.land m1 m2 from rfl, h]
+    have hbt : Nat.testBit (m1 &&& m2) i = (Nat.testBit m1 i && Nat.testBit m2 i) :=
+      Nat.testBit_and m1 m2 i
+    rw [hband, hb1] at hbt
+    have hper : Nat.testBit m2 i = true := by simpa using hbt
+    rw [hper]
+    simp
+
 /-! ## Strength reduction: multiply by a power of two is a left shift. -/
 
 /-- For `k < 64`, multiplying by `2^k` and shifting left by `k` agree exactly

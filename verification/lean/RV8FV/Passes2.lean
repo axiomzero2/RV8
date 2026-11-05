@@ -31,7 +31,11 @@ CEP:FV-SCRIPT: verification/lean/RV8FV/Passes2.lean
 CEP:FV-SORRY-COUNT: 0
 CEP:FV-REFINEMENT: run-level SemEquiv for the passes without FV-0 theorems is
   the tracked obligation recorded in their frames; the lattice laws, the
-  solver stability, and the aliased proved passes are FV-0.
+  solver stability, the aliased proved passes, the division-fault laws
+  (divSafe_notStuck, binop_notDivZero_of_ne_udiv, divSafe_discharge over
+  the corrected DivSafe), and the #68/#69 step-agreement theorems
+  (p68_step_agree, p69_step_agree, with the corrected subsumption
+  condition and source-carrying xor oracle) are FV-0.
 CEP:FV-AXIOMS: none.
 -/
 
@@ -596,12 +600,100 @@ def BoundsChecked (rs : List (VReg × Interval)) (i n : VReg) : Prop :=
   | _, _ => False
 
 /-- #65: a division is protection-free when the divisor is a nonzero
-    immediate (machine-checked at the instruction level: `Binop.eval` of
-    `udiv` by a nonzero immediate is `some`). -/
+    immediate; a register divisor cannot be proven safe locally (it may
+    hold zero at runtime), and every non-division operation cannot raise
+    the division fault at all. The machine-checked discharge is
+    `divSafe_discharge` below. -/
 def DivSafe (o : Binop) (b : Arg) : Prop :=
   match o, b with
   | .udiv, .imm w => w ≠ 0
+  | .udiv, .reg _ => False
   | _, _ => True
+
+/-- Non-division operations are total on the word domain: their
+    `Binop.eval` always yields a value (the word IS the wrapping
+    domain), so no division fault can be raised. -/
+theorem binop_eval_some_of_ne_udiv (o : Binop) (x y : Word) (ho : o ≠ .udiv) :
+    ∃ r, o.eval x y = some r := by
+  cases o with
+  | udiv => exact absurd rfl ho
+  | add => exact ⟨_, rfl⟩
+  | sub => exact ⟨_, rfl⟩
+  | mul => exact ⟨_, rfl⟩
+  | and => exact ⟨_, rfl⟩
+  | or => exact ⟨_, rfl⟩
+  | xor => exact ⟨_, rfl⟩
+  | shl => exact ⟨_, rfl⟩
+  | lshr => exact ⟨_, rfl⟩
+
+/-- #65 (FV-0): the division trap-freedom law: a `udiv` whose divisor is
+    a nonzero immediate cannot raise the `divZero` fault class, whatever
+    the state of the dividend operand (an undefined dividend is the
+    separate `undefRead` class, not the division fault). -/
+theorem divSafe_notStuck (m : Machine) (d : VReg) (a : Arg) (w : Word) (hw : w ≠ 0) :
+    stepInstr m (Instr.binop d .udiv a (.imm w)) ≠ .error .divZero := by
+  have hdiv : ∀ x : Word, Binop.eval .udiv x w = some (x / w) := by
+    intro x
+    simp only [Binop.eval, if_neg hw]
+  cases a with
+  | reg r =>
+    cases hr : m.regs r with
+    | none => simp [stepInstr, Arg.eval, hr]
+    | some av => simp [stepInstr, Arg.eval, hr, hdiv av]
+  | imm av => simp [stepInstr, Arg.eval, hdiv av]
+
+/-- The non-division operations never raise the division fault: their
+    `Binop.eval` is total (the word IS the wrapping domain), so the only
+    possible fault of such an instruction is `undefRead` on an operand. -/
+theorem binop_notDivZero_of_ne_udiv (m : Machine) (d : VReg) (o : Binop) (a b : Arg)
+    (ho : o ≠ .udiv) :
+    stepInstr m (Instr.binop d o a b) ≠ .error .divZero := by
+  cases a with
+  | reg r =>
+    cases hr : m.regs r with
+    | none => simp [stepInstr, Arg.eval, hr]
+    | some av =>
+      cases b with
+      | reg r2 =>
+        cases hr2 : m.regs r2 with
+        | none => simp [stepInstr, Arg.eval, hr, hr2]
+        | some bv =>
+          obtain ⟨rv, hrv⟩ := binop_eval_some_of_ne_udiv o av bv ho
+          simp [stepInstr, Arg.eval, hr, hr2, hrv]
+      | imm bv =>
+        obtain ⟨rv, hrv⟩ := binop_eval_some_of_ne_udiv o av bv ho
+        simp [stepInstr, Arg.eval, hr, hrv]
+  | imm av =>
+    cases b with
+    | reg r2 =>
+      cases hr2 : m.regs r2 with
+      | none => simp [stepInstr, Arg.eval, hr2]
+      | some bv =>
+        obtain ⟨rv, hrv⟩ := binop_eval_some_of_ne_udiv o av bv ho
+        simp [stepInstr, Arg.eval, hr2, hrv]
+    | imm bv =>
+      obtain ⟨rv, hrv⟩ := binop_eval_some_of_ne_udiv o av bv ho
+      simp [stepInstr, Arg.eval, hrv]
+
+/-- #65 (FV-0): the safety predicate discharges the division fault: on
+    any instruction whose divisor passes `DivSafe`, the `divZero` fault
+    class is unreachable, whatever the register state. -/
+theorem divSafe_discharge (m : Machine) (d : VReg) (o : Binop) (a b : Arg)
+    (hsafe : DivSafe o b) :
+    stepInstr m (Instr.binop d o a b) ≠ .error .divZero := by
+  cases o with
+  | udiv =>
+    cases b with
+    | imm w => exact divSafe_notStuck m d a w hsafe
+    | reg r => simp [DivSafe] at hsafe
+  | add => exact binop_notDivZero_of_ne_udiv m d .add a b (by simp)
+  | sub => exact binop_notDivZero_of_ne_udiv m d .sub a b (by simp)
+  | mul => exact binop_notDivZero_of_ne_udiv m d .mul a b (by simp)
+  | and => exact binop_notDivZero_of_ne_udiv m d .and a b (by simp)
+  | or => exact binop_notDivZero_of_ne_udiv m d .or a b (by simp)
+  | xor => exact binop_notDivZero_of_ne_udiv m d .xor a b (by simp)
+  | shl => exact binop_notDivZero_of_ne_udiv m d .shl a b (by simp)
+  | lshr => exact binop_notDivZero_of_ne_udiv m d .lshr a b (by simp)
 
 /-- #66: an overflow check on `a ∘ b` is redundant when the operation
     cannot trap on this model: `Binop.eval` yields a value for every
@@ -660,32 +752,58 @@ theorem p63_length (p : Prog) (safe : BlockId → Nat → Bool) :
 
 /-- #67/#69: the truncation idiom in the LIR is masking: `d := a & m` with
     `m = 2^n - 1`. When the first operand was itself defined by a mask and
-    the outer mask is a submask (`m₂ && m₁ = m₂`), the outer operation is
-    redundant and becomes a copy (the value identity is the land-submask
-    law; the SSA link is the tracked part). -/
+    the inner mask is subsumed by the outer mask (`m₁ & m₂ = m₁`), the
+    outer operation is redundant and becomes a copy of the inner-masked
+    source (the value identity is the land-submask law `wand_submask`;
+    the SSA link — defined-before, not clobbered — is the tracked part). -/
 def p69_truncElim (innerMask : VReg → Option Word) : Instr → Instr
   | .binop d .and (.reg s) (.imm m2) =>
     match innerMask s with
     | some m1 =>
-      if Nat.land m2 m1 = m2
+      if Nat.land m1 m2 = m1
       then .copy d (.reg s)
       else .binop d .and (.reg s) (.imm m2)
     | none => .binop d .and (.reg s) (.imm m2)
   | i => i
 
+/-- #69 (FV-0): the truncation-elimination agreement: when the source
+    register holds the inner-masked value (`s := v & m1`) and the inner
+    mask is subsumed by the outer mask (`m1 & m2 = m1`), the rewritten
+    copy performs the same register write, memory effect, and trap class
+    as the original (the value identity is `wand_submask`). -/
+theorem p69_step_agree (m : Machine) (d s : VReg) (v m1 m2 : Word)
+    (hsub : Nat.land m1 m2 = m1) (hs : m.regs s = some (wand v m1)) :
+    stepInstr m (Instr.binop d .and (.reg s) (.imm m2))
+      = stepInstr m (Instr.copy d (.reg s)) := by
+  simp only [stepInstr, Arg.eval, hs, Binop.eval]
+  rw [wand_submask v m1 m2 hsub]
+
 /-- #68: the extension idiom is the double mask-xor `d := (a ^ m) ^ m`:
-    when the first operand was defined by xor with the same mask, the outer
-    operation is the identity (`wxor_invol`) and becomes a copy (the SSA
-    link is the tracked part, exactly like the DCE dominance argument). -/
-def p68_extElim (innerXorMask : VReg → Option Word) : Instr → Instr
+    when the first operand was defined by xoring a source the compiler
+    still knows with the same mask, the pair folds to a copy of that
+    source (the value identity is `wxor_invol`; the SSA link — the source
+    dominates and is not clobbered — is the tracked part, exactly like
+    the DCE dominance argument). -/
+def p68_extElim (innerXor : VReg → Option (VReg × Word)) : Instr → Instr
   | .binop d .xor (.reg s) (.imm m) =>
-    match innerXorMask s with
-    | some m' =>
+    match innerXor s with
+    | some (src, m') =>
       if m' = m
-      then .copy d (.reg s)
+      then .copy d (.reg src)
       else .binop d .xor (.reg s) (.imm m)
     | none => .binop d .xor (.reg s) (.imm m)
   | i => i
+
+/-- #68 (FV-0): the extension-elimination agreement: when the source
+    register holds the once-masked value (`s := v ^ w`, `src := v`) and
+    the outer mask matches the inner mask, the rewritten copy performs
+    the same register write, memory effect, and trap class as the
+    original (the value identity is `wxor_invol`). -/
+theorem p68_step_agree (m : Machine) (d src s : VReg) (v w : Word)
+    (hsrc : m.regs src = some v) (hs : m.regs s = some (wxor v w)) :
+    stepInstr m (Instr.binop d .xor (.reg s) (.imm w))
+      = stepInstr m (Instr.copy d (.reg src)) := by
+  simp only [stepInstr, Arg.eval, hsrc, hs, Binop.eval, wxor_invol]
 
 /-- #70: type punning: load/store at the same address with different type
     interpretations is the identity on the cell; the contract for a safe
