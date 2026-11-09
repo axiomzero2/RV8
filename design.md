@@ -1,4 +1,3 @@
-Here is the **final, curated list** of optimizations for your Compiler 2.0. I have removed the items you specified and re-numbered the remaining ~175 optimizations to keep the index clean.
 
 ### 1. Control Flow & Structural Optimizations
 *Focus: Manipulating the shape of the program and loop structures.*
