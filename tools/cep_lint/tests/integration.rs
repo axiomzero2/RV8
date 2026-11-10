@@ -50,7 +50,7 @@ fn write(path: &Path, content: &str) {
 fn write_standard(root: &Path) {
     // The shipped config carries the DOC-SYNC rule; the synthetic repo needs a document
     // with one heading per configured rule and the version marker.
-    let mut doc = String::from("# CEP&CC 0.3\n\nVersion: **0.3**\n");
+    let mut doc = String::from("# CEP&CC 0.4\n\nVersion: **0.4**\n");
     for id in CONFIGURED_RULE_IDS {
         doc.push_str("\n### Rule ");
         doc.push_str(id);
@@ -66,7 +66,7 @@ fn write_config(root: &Path) -> PathBuf {
     path
 }
 
-const CONFIGURED_RULE_IDS: [&str; 18] = [
+const CONFIGURED_RULE_IDS: [&str; 19] = [
     "CEP-LINT-FILE-HEADER",
     "CEP-LINT-FUNC-BLOCK",
     "CEP-LINT-STATUS-VALUE",
@@ -84,6 +84,7 @@ const CONFIGURED_RULE_IDS: [&str; 18] = [
     "CEP-LINT-NAMING-TYPE",
     "CEP-LINT-NAMING-FUNC",
     "CEP-LINT-COMMENTED-CODE",
+    "CEP-LINT-ATOMIC-FILE",
     "CEP-LINT-DOC-SYNC",
 ];
 
@@ -379,6 +380,6 @@ fn version_banner_names_the_standard() {
     let (code, stdout, _stderr) = run_cli(&root, &["--version"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("cep_lint"), "banner missing tool version: {}", stdout);
-    assert!(stdout.contains("CEP&CC 0.3"), "banner missing standard version: {}", stdout);
+    assert!(stdout.contains("CEP&CC 0.4"), "banner missing standard version: {}", stdout);
     std::fs::remove_dir_all(&root).ok();
 }

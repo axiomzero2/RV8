@@ -1,374 +1,454 @@
 {
-  "manifest": "cep_lint self-test (CEP&CC 50.6.3)",
-  "manifest_version": 1,
-  "standard": "0.3",
-  "scenario_schema": "each scenario: name, config (JSON text), files (name -> source), optional doc {path, text} written into the temporary root, expect_findings {RULE: exact count}; every actual finding must be declared and every declared count must match exactly",
-  "scenarios": [
-    {
-      "name": "file_header_missing_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-FILE-HEADER\": {\"severity\": 1, \"check\": \"comment_block_schema\", \"mode\": \"file_header\", \"required_fields\": [\"CEP:FILE\", \"CEP:WHAT\", \"CEP:WHY\", \"CEP:CLASS\", \"CEP:STATUS\", \"CEP:FAILURE\", \"CEP:ASSUMES\", \"CEP:COST\", \"CEP:EVIDENCE\"], \"class_field\": \"CEP:CLASS\", \"allowed_classes\": [\"CEP-0\", \"CEP-1\", \"CEP-2\", \"CC\", \"FFI\", \"HPC-0\", \"HPC-1\", \"HPC-2\", \"RCS-0\", \"RCS-1\", \"RCS-2\"], \"max_start_line\": 1}}}",
-      "files": {
-        "a.rs": "let x = 1;\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-FILE-HEADER": 1
-      }
-    },
-    {
-      "name": "file_header_present_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-FILE-HEADER\": {\"severity\": 1, \"check\": \"comment_block_schema\", \"mode\": \"file_header\", \"required_fields\": [\"CEP:FILE\", \"CEP:WHAT\", \"CEP:WHY\", \"CEP:CLASS\", \"CEP:STATUS\", \"CEP:FAILURE\", \"CEP:ASSUMES\", \"CEP:COST\", \"CEP:EVIDENCE\"], \"class_field\": \"CEP:CLASS\", \"allowed_classes\": [\"CEP-0\", \"CEP-1\", \"CEP-2\", \"CC\", \"FFI\", \"HPC-0\", \"HPC-1\", \"HPC-2\", \"RCS-0\", \"RCS-1\", \"RCS-2\"], \"max_start_line\": 1}}}",
-      "files": {
-        "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-2\n// CEP:STATUS: complete\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\n\nlet x = 1;\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "func_block_undocumented_nontrivial_fn_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-FUNC-BLOCK\": {\"severity\": 1, \"check\": \"function_policy\", \"mode\": \"block\", \"required_fields\": [\"CEP:WHAT\", \"CEP:WHY\", \"CEP:STATUS\", \"CEP:FAILURE\", \"CEP:ASSUMES\", \"CEP:COST\", \"CEP:EVIDENCE\"], \"min_body_statements\": 2}}}",
-      "files": {
-        "a.rs": "pub fn f() -> u32 {\n    let a = 1;\n    let b = 2;\n    a + b\n}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-FUNC-BLOCK": 1
-      }
-    },
-    {
-      "name": "func_block_documented_fn_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-FUNC-BLOCK\": {\"severity\": 1, \"check\": \"function_policy\", \"mode\": \"block\", \"required_fields\": [\"CEP:WHAT\", \"CEP:WHY\", \"CEP:STATUS\", \"CEP:FAILURE\", \"CEP:ASSUMES\", \"CEP:COST\", \"CEP:EVIDENCE\"], \"min_body_statements\": 2}}}",
-      "files": {
-        "a.rs": "/// CEP:WHAT: v\n/// CEP:WHY: v\n/// CEP:STATUS: v\n/// CEP:FAILURE: v\n/// CEP:ASSUMES: v\n/// CEP:COST: v\n/// CEP:EVIDENCE: v\npub fn f() -> u32 {\n    let a = 1;\n    let b = 2;\n    a + b\n}\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "status_value_rejects_unknown_status",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STATUS-VALUE\": {\"severity\": 2, \"check\": \"comment_block_schema\", \"mode\": \"status_value\", \"status_field\": \"CEP:STATUS\", \"allowed_values\": [\"complete\", \"partial\", \"stub\", \"placeholder\"]}}}",
-      "files": {
-        "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-2\n// CEP:STATUS: banana\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\n\nlet x = 1;\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-STATUS-VALUE": 1
-      }
-    },
-    {
-      "name": "status_value_accepts_complete",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STATUS-VALUE\": {\"severity\": 2, \"check\": \"comment_block_schema\", \"mode\": \"status_value\", \"status_field\": \"CEP:STATUS\", \"allowed_values\": [\"complete\", \"partial\", \"stub\", \"placeholder\"]}}}",
-      "files": {
-        "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-2\n// CEP:STATUS: complete\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\n\nlet x = 1;\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "todo_without_suppression_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-TODO-OWNER\": {\"severity\": 1, \"check\": \"comment_regex\", \"pattern\": \"\\\\b(TODO|FIXME|XXX|HACK)\\\\b\", \"icase\": true, \"suppression_pattern\": \"CEP:TODO\\\\([^)]+\\\\):\\\\s*CEP-\\\\d+\"}}}",
-      "files": {
-        "a.rs": "// TODO fix this\nlet x = 1;\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-TODO-OWNER": 1
-      }
-    },
-    {
-      "name": "todo_with_ticket_suppression_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-TODO-OWNER\": {\"severity\": 1, \"check\": \"comment_regex\", \"pattern\": \"\\\\b(TODO|FIXME|XXX|HACK)\\\\b\", \"icase\": true, \"suppression_pattern\": \"CEP:TODO\\\\([^)]+\\\\):\\\\s*CEP-\\\\d+\"}}}",
-      "files": {
-        "a.rs": "// CEP:TODO(alice): CEP-314: fix later\nlet x = 1;\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "stub_status_without_owner_and_ticket_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STUB-DECL\": {\"severity\": 1, \"check\": \"comment_block_schema\", \"mode\": \"stub_requirements\", \"status_field\": \"CEP:STATUS\", \"statuses\": [\"stub\", \"partial\", \"placeholder\"], \"required_fields\": [\"CEP:OWNER\", \"CEP:TICKET\"]}}}",
-      "files": {
-        "a.rs": "// CEP:WHAT: X\n// CEP:STATUS: stub\npub fn f() -> u32 {\n    1\n}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-STUB-DECL": 1
-      }
-    },
-    {
-      "name": "stub_status_with_owner_and_ticket_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STUB-DECL\": {\"severity\": 1, \"check\": \"comment_block_schema\", \"mode\": \"stub_requirements\", \"status_field\": \"CEP:STATUS\", \"statuses\": [\"stub\", \"partial\", \"placeholder\"], \"required_fields\": [\"CEP:OWNER\", \"CEP:TICKET\"]}}}",
-      "files": {
-        "a.rs": "// CEP:WHAT: X\n// CEP:STATUS: stub\n// CEP:OWNER: axiomzero2\n// CEP:TICKET: RV8-1\npub fn f() -> u32 {\n    1\n}\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "placeholder_word_in_prose_comment_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-PLACEHOLDER-COMMENT\": {\"severity\": 1, \"check\": \"comment_regex\", \"pattern\": \"\\\\b(not implemented|unimplemented|placeholder|fixme|tbd|wip)\\\\b\", \"icase\": true, \"suppression_pattern\": \"^\\\\s*//\\\\s*CEP:\"}}}",
-      "files": {
-        "a.rs": "// not implemented yet\nlet x = 1;\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-PLACEHOLDER-COMMENT": 1
-      }
-    },
-    {
-      "name": "placeholder_word_in_cep_comment_is_suppressed",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-PLACEHOLDER-COMMENT\": {\"severity\": 1, \"check\": \"comment_regex\", \"pattern\": \"\\\\b(not implemented|unimplemented|placeholder|fixme|tbd|wip)\\\\b\", \"icase\": true, \"suppression_pattern\": \"^\\\\s*//\\\\s*CEP:\"}}}",
-      "files": {
-        "a.rs": "// CEP: the value maps to the fixed fallback\nlet x = 1;\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "placeholder_word_in_string_literal_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-PLACEHOLDER-TEXT\": {\"severity\": 1, \"check\": \"string_literal_regex\", \"pattern\": \"\\\\b(not implemented|unimplemented|placeholder|tbd)\\\\b\", \"icase\": true}}}",
-      "files": {
-        "a.rs": "let s = \"tbd\";\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-PLACEHOLDER-TEXT": 1
-      }
-    },
-    {
-      "name": "plain_string_literal_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-PLACEHOLDER-TEXT\": {\"severity\": 1, \"check\": \"string_literal_regex\", \"pattern\": \"\\\\b(not implemented|unimplemented|placeholder|tbd)\\\\b\", \"icase\": true}}}",
-      "files": {
-        "a.rs": "let s = \"ready\";\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "unsanctioned_numeric_literal_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-MAGIC-NUMBER\": {\"severity\": 2, \"check\": \"numeric_literal_policy\", \"allowed_values\": [0, 1], \"exempt_contexts\": [\"const\", \"static\", \"enum\", \"assert\", \"test\", \"derive\", \"cfg\"]}}}",
-      "files": {
-        "a.rs": "pub fn f() -> u32 {\n    let a = 42;\n    a\n}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-MAGIC-NUMBER": 1
-      }
-    },
-    {
-      "name": "const_context_literal_is_exempt",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-MAGIC-NUMBER\": {\"severity\": 2, \"check\": \"numeric_literal_policy\", \"allowed_values\": [0, 1], \"exempt_contexts\": [\"const\", \"static\", \"enum\", \"assert\", \"test\", \"derive\", \"cfg\"]}}}",
-      "files": {
-        "a.rs": "const ANSWER: u32 = 42;\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "unprefixed_macros_are_flagged_in_both_dialects",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-MACRO-PREFIX\": {\"severity\": 2, \"check\": \"macro_prefix_policy\", \"name_pattern\": \"^CEP_\", \"guard_pattern\": \"^[A-Z][A-Z0-9_]*_H(PP|XX)?$\"}}}",
-      "files": {
-        "a.rs": "#define MAX 4096\nmacro_rules! inner {\n    () => {};\n}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-MACRO-PREFIX": 2
-      }
-    },
-    {
-      "name": "prefixed_and_guarded_macros_are_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-MACRO-PREFIX\": {\"severity\": 2, \"check\": \"macro_prefix_policy\", \"name_pattern\": \"^CEP_\", \"guard_pattern\": \"^[A-Z][A-Z0-9_]*_H(PP|XX)?$\"}}}",
-      "files": {
-        "a.rs": "#define CEP_TARGET_CACHE_LINE_BYTES 64\n#define GUARD_HPP\nmacro_rules! CEP_outer {\n    () => {};\n}\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "banned_token_in_cep0_file_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-HOT-BANNED\": {\"severity\": 0, \"check\": \"banned_token_policy\", \"applies_to_classes\": [\"CEP-0\", \"HPC-0\", \"RCS-0\"], \"class_field\": \"CEP:CLASS\", \"enforce\": true, \"tokens\": [\".unwrap()\", \".expect(\", \"panic!(\", \"todo!(\", \"unimplemented!\", \"Box::new\", \"Vec::new\", \"String::new\", \"format!(\", \"println!(\", \"eprintln!\", \"std::time::Instant\", \"dyn \", \"Rc::new\", \"Arc::new\", \"Mutex::new\", \"RwLock::new\", \".clone()\", \"thread::spawn\"]}}}",
-      "files": {
-        "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-0\n// CEP:STATUS: complete\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\npub fn f() -> u32 {\n    let v = Vec::new;\n    1\n}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-HOT-BANNED": 1
-      }
-    },
-    {
-      "name": "cep0_file_without_banned_tokens_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-HOT-BANNED\": {\"severity\": 0, \"check\": \"banned_token_policy\", \"applies_to_classes\": [\"CEP-0\", \"HPC-0\", \"RCS-0\"], \"class_field\": \"CEP:CLASS\", \"enforce\": true, \"tokens\": [\".unwrap()\", \".expect(\", \"panic!(\", \"todo!(\", \"unimplemented!\", \"Box::new\", \"Vec::new\", \"String::new\", \"format!(\", \"println!(\", \"eprintln!\", \"std::time::Instant\", \"dyn \", \"Rc::new\", \"Arc::new\", \"Mutex::new\", \"RwLock::new\", \".clone()\", \"thread::spawn\"]}}}",
-      "files": {
-        "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-0\n// CEP:STATUS: complete\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\npub fn f() -> u32 {\n    let a = 1;\n    let b = 2;\n    a + b\n}\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "empty_body_in_complete_fn_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STUB-BODY\": {\"severity\": 1, \"check\": \"function_policy\", \"mode\": \"stub_body\", \"suppress_statuses\": [\"stub\", \"partial\", \"placeholder\"]}}}",
-      "files": {
-        "a.rs": "/// CEP:WHAT: v\n/// CEP:WHY: v\n/// CEP:STATUS: complete\n/// CEP:FAILURE: v\n/// CEP:ASSUMES: v\n/// CEP:COST: v\n/// CEP:EVIDENCE: v\npub fn f() {\n}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-STUB-BODY": 1
-      }
-    },
-    {
-      "name": "empty_body_in_stub_fn_is_suppressed",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STUB-BODY\": {\"severity\": 1, \"check\": \"function_policy\", \"mode\": \"stub_body\", \"suppress_statuses\": [\"stub\", \"partial\", \"placeholder\"]}}}",
-      "files": {
-        "a.rs": "/// CEP:WHAT: v\n/// CEP:WHY: v\n/// CEP:STATUS: stub\n/// CEP:FAILURE: v\n/// CEP:ASSUMES: v\n/// CEP:COST: v\n/// CEP:EVIDENCE: v\npub fn f() {\n}\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "empty_catch_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-EMPTY-CATCH\": {\"severity\": 1, \"check\": \"flat_code_regex\", \"pattern\": \"catch\\\\s*\\\\([^)]*\\\\)\\\\s*\\\\{\\\\s*\\\\}\"}}}",
-      "files": {
-        "a.hpp": "try { g(); } catch (E) {}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-EMPTY-CATCH": 1
-      }
-    },
-    {
-      "name": "catch_with_body_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-EMPTY-CATCH\": {\"severity\": 1, \"check\": \"flat_code_regex\", \"pattern\": \"catch\\\\s*\\\\([^)]*\\\\)\\\\s*\\\\{\\\\s*\\\\}\"}}}",
-      "files": {
-        "a.hpp": "try { g(); } catch (E) { log(E); }\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "empty_branch_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-EMPTY-BRANCH\": {\"severity\": 2, \"check\": \"flat_code_regex\", \"pattern\": \"\\\\b(if|else|for|while|match)[^{]*\\\\{\\\\s*\\\\}\"}}}",
-      "files": {
-        "a.rs": "pub fn f(x: u32) -> u32 {\n    if (x) {}\n    x\n}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-EMPTY-BRANCH": 1
-      }
-    },
-    {
-      "name": "constant_return_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-CONSTANT-RETURN\": {\"severity\": 2, \"check\": \"function_policy\", \"mode\": \"constant_return\", \"pattern\": \"^return (true|false|nullptr);$\"}}}",
-      "files": {
-        "a.hpp": "bool f() {\n    return nullptr;\n}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-CONSTANT-RETURN": 1
-      }
-    },
-    {
-      "name": "computed_return_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-CONSTANT-RETURN\": {\"severity\": 2, \"check\": \"function_policy\", \"mode\": \"constant_return\", \"pattern\": \"^return (true|false|nullptr);$\"}}}",
-      "files": {
-        "a.hpp": "bool f(int x) {\n    return x > 0;\n}\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "lowercase_type_name_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-NAMING-TYPE\": {\"severity\": 2, \"check\": \"flat_code_regex\", \"pattern\": \"\\\\b(struct|enum)\\\\s+([A-Za-z_][A-Za-z0-9_]*)\", \"name_pattern\": \"^[A-Z][A-Za-z0-9]*$\"}}}",
-      "files": {
-        "a.hpp": "struct widget { int a; };\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-NAMING-TYPE": 1
-      }
-    },
-    {
-      "name": "pascal_type_name_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-NAMING-TYPE\": {\"severity\": 2, \"check\": \"flat_code_regex\", \"pattern\": \"\\\\b(struct|enum)\\\\s+([A-Za-z_][A-Za-z0-9_]*)\", \"name_pattern\": \"^[A-Z][A-Za-z0-9]*$\"}}}",
-      "files": {
-        "a.hpp": "struct Widget { int a; };\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "uppercase_fn_name_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-NAMING-FUNC\": {\"severity\": 2, \"check\": \"function_policy\", \"mode\": \"naming\", \"name_pattern\": \"^[a-z][a-z0-9_]*$\"}}}",
-      "files": {
-        "a.rs": "pub fn BadName(x: u32) -> u32 {\n    let a = x;\n    a\n}\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-NAMING-FUNC": 1
-      }
-    },
-    {
-      "name": "snake_fn_name_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-NAMING-FUNC\": {\"severity\": 2, \"check\": \"function_policy\", \"mode\": \"naming\", \"name_pattern\": \"^[a-z][a-z0-9_]*$\"}}}",
-      "files": {
-        "a.rs": "pub fn good_name(x: u32) -> u32 {\n    let a = x;\n    a\n}\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "commented_out_code_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-COMMENTED-CODE\": {\"severity\": 2, \"check\": \"comment_regex\", \"pattern\": \"^\\\\s*//\\\\s*(let |fn |if |for |while |return |pub )\", \"suppression_pattern\": \"CEP:\"}}}",
-      "files": {
-        "a.rs": "// let x = 1;\nlet y = 2;\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-COMMENTED-CODE": 1
-      }
-    },
-    {
-      "name": "cep_annotated_comment_is_suppressed",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-COMMENTED-CODE\": {\"severity\": 2, \"check\": \"comment_regex\", \"pattern\": \"^\\\\s*//\\\\s*(let |fn |if |for |while |return |pub )\", \"suppression_pattern\": \"CEP:\"}}}",
-      "files": {
-        "a.rs": "// CEP: the let form below is the documented shape\nlet y = 2;\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "doc_sync_agreement_is_clean",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}}}",
-      "files": {
-        "a.rs": "let x = 1;\n"
-      },
-      "doc": {
-        "path": "standard.md",
-        "text": "# T\nVersion: **0.3**\n### Rule CEP-LINT-DOC-SYNC\n"
-      },
-      "expect_findings": {}
-    },
-    {
-      "name": "doc_sync_version_mismatch_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}}}",
-      "files": {
-        "a.rs": "let x = 1;\n"
-      },
-      "doc": {
-        "path": "standard.md",
-        "text": "# T\nVersion: **0.2**\n### Rule CEP-LINT-DOC-SYNC\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-DOC-SYNC": 1
-      }
-    },
-    {
-      "name": "doc_sync_missing_version_line_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}}}",
-      "files": {
-        "a.rs": "let x = 1;\n"
-      },
-      "doc": {
-        "path": "standard.md",
-        "text": "# T\n### Rule CEP-LINT-DOC-SYNC\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-DOC-SYNC": 1
-      }
-    },
-    {
-      "name": "doc_sync_documented_rule_without_configuration_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}}}",
-      "files": {
-        "a.rs": "let x = 1;\n"
-      },
-      "doc": {
-        "path": "standard.md",
-        "text": "# T\nVersion: **0.3**\n### Rule CEP-LINT-DOC-SYNC\n### Rule CEP-LINT-GHOST\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-DOC-SYNC": 1
-      }
-    },
-    {
-      "name": "doc_sync_configured_rule_without_heading_is_flagged",
-      "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}, \"CEP-LINT-GHOST\": {\"severity\": 2, \"check\": \"comment_regex\", \"pattern\": \"\\\\bGHOST\\\\b\"}}}",
-      "files": {
-        "a.rs": "let x = 1;\n"
-      },
-      "doc": {
-        "path": "standard.md",
-        "text": "# T\nVersion: **0.3**\n### Rule CEP-LINT-DOC-SYNC\n"
-      },
-      "expect_findings": {
-        "CEP-LINT-DOC-SYNC": 1
-      }
-    }
-  ]
+ "manifest": "cep_lint self-test (CEP&CC 50.6.3)",
+ "manifest_version": 1,
+ "standard": "0.3",
+ "scenario_schema": "each scenario: name, config (JSON text), files (name -> source), optional doc {path, text} written into the temporary root, expect_findings {RULE: exact count}; every actual finding must be declared and every declared count must match exactly",
+ "scenarios": [
+  {
+   "name": "file_header_missing_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-FILE-HEADER\": {\"severity\": 1, \"check\": \"comment_block_schema\", \"mode\": \"file_header\", \"required_fields\": [\"CEP:FILE\", \"CEP:WHAT\", \"CEP:WHY\", \"CEP:CLASS\", \"CEP:STATUS\", \"CEP:FAILURE\", \"CEP:ASSUMES\", \"CEP:COST\", \"CEP:EVIDENCE\"], \"class_field\": \"CEP:CLASS\", \"allowed_classes\": [\"CEP-0\", \"CEP-1\", \"CEP-2\", \"CC\", \"FFI\", \"HPC-0\", \"HPC-1\", \"HPC-2\", \"RCS-0\", \"RCS-1\", \"RCS-2\"], \"max_start_line\": 1}}}",
+   "files": {
+    "a.rs": "let x = 1;\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-FILE-HEADER": 1
+   }
+  },
+  {
+   "name": "file_header_present_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-FILE-HEADER\": {\"severity\": 1, \"check\": \"comment_block_schema\", \"mode\": \"file_header\", \"required_fields\": [\"CEP:FILE\", \"CEP:WHAT\", \"CEP:WHY\", \"CEP:CLASS\", \"CEP:STATUS\", \"CEP:FAILURE\", \"CEP:ASSUMES\", \"CEP:COST\", \"CEP:EVIDENCE\"], \"class_field\": \"CEP:CLASS\", \"allowed_classes\": [\"CEP-0\", \"CEP-1\", \"CEP-2\", \"CC\", \"FFI\", \"HPC-0\", \"HPC-1\", \"HPC-2\", \"RCS-0\", \"RCS-1\", \"RCS-2\"], \"max_start_line\": 1}}}",
+   "files": {
+    "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-2\n// CEP:STATUS: complete\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\n\nlet x = 1;\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "func_block_undocumented_nontrivial_fn_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-FUNC-BLOCK\": {\"severity\": 1, \"check\": \"function_policy\", \"mode\": \"block\", \"required_fields\": [\"CEP:WHAT\", \"CEP:WHY\", \"CEP:STATUS\", \"CEP:FAILURE\", \"CEP:ASSUMES\", \"CEP:COST\", \"CEP:EVIDENCE\"], \"min_body_statements\": 2}}}",
+   "files": {
+    "a.rs": "pub fn f() -> u32 {\n    let a = 1;\n    let b = 2;\n    a + b\n}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-FUNC-BLOCK": 1
+   }
+  },
+  {
+   "name": "func_block_documented_fn_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-FUNC-BLOCK\": {\"severity\": 1, \"check\": \"function_policy\", \"mode\": \"block\", \"required_fields\": [\"CEP:WHAT\", \"CEP:WHY\", \"CEP:STATUS\", \"CEP:FAILURE\", \"CEP:ASSUMES\", \"CEP:COST\", \"CEP:EVIDENCE\"], \"min_body_statements\": 2}}}",
+   "files": {
+    "a.rs": "/// CEP:WHAT: v\n/// CEP:WHY: v\n/// CEP:STATUS: v\n/// CEP:FAILURE: v\n/// CEP:ASSUMES: v\n/// CEP:COST: v\n/// CEP:EVIDENCE: v\npub fn f() -> u32 {\n    let a = 1;\n    let b = 2;\n    a + b\n}\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "status_value_rejects_unknown_status",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STATUS-VALUE\": {\"severity\": 2, \"check\": \"comment_block_schema\", \"mode\": \"status_value\", \"status_field\": \"CEP:STATUS\", \"allowed_values\": [\"complete\", \"partial\", \"stub\", \"placeholder\"]}}}",
+   "files": {
+    "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-2\n// CEP:STATUS: banana\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\n\nlet x = 1;\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-STATUS-VALUE": 1
+   }
+  },
+  {
+   "name": "status_value_accepts_complete",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STATUS-VALUE\": {\"severity\": 2, \"check\": \"comment_block_schema\", \"mode\": \"status_value\", \"status_field\": \"CEP:STATUS\", \"allowed_values\": [\"complete\", \"partial\", \"stub\", \"placeholder\"]}}}",
+   "files": {
+    "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-2\n// CEP:STATUS: complete\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\n\nlet x = 1;\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "todo_without_suppression_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-TODO-OWNER\": {\"severity\": 1, \"check\": \"comment_regex\", \"pattern\": \"\\\\b(TODO|FIXME|XXX|HACK)\\\\b\", \"icase\": true, \"suppression_pattern\": \"CEP:TODO\\\\([^)]+\\\\):\\\\s*CEP-\\\\d+\"}}}",
+   "files": {
+    "a.rs": "// TODO fix this\nlet x = 1;\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-TODO-OWNER": 1
+   }
+  },
+  {
+   "name": "todo_with_ticket_suppression_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-TODO-OWNER\": {\"severity\": 1, \"check\": \"comment_regex\", \"pattern\": \"\\\\b(TODO|FIXME|XXX|HACK)\\\\b\", \"icase\": true, \"suppression_pattern\": \"CEP:TODO\\\\([^)]+\\\\):\\\\s*CEP-\\\\d+\"}}}",
+   "files": {
+    "a.rs": "// CEP:TODO(alice): CEP-314: fix later\nlet x = 1;\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "stub_status_without_owner_and_ticket_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STUB-DECL\": {\"severity\": 1, \"check\": \"comment_block_schema\", \"mode\": \"stub_requirements\", \"status_field\": \"CEP:STATUS\", \"statuses\": [\"stub\", \"partial\", \"placeholder\"], \"required_fields\": [\"CEP:OWNER\", \"CEP:TICKET\"]}}}",
+   "files": {
+    "a.rs": "// CEP:WHAT: X\n// CEP:STATUS: stub\npub fn f() -> u32 {\n    1\n}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-STUB-DECL": 1
+   }
+  },
+  {
+   "name": "stub_status_with_owner_and_ticket_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STUB-DECL\": {\"severity\": 1, \"check\": \"comment_block_schema\", \"mode\": \"stub_requirements\", \"status_field\": \"CEP:STATUS\", \"statuses\": [\"stub\", \"partial\", \"placeholder\"], \"required_fields\": [\"CEP:OWNER\", \"CEP:TICKET\"]}}}",
+   "files": {
+    "a.rs": "// CEP:WHAT: X\n// CEP:STATUS: stub\n// CEP:OWNER: axiomzero2\n// CEP:TICKET: RV8-1\npub fn f() -> u32 {\n    1\n}\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "placeholder_word_in_prose_comment_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-PLACEHOLDER-COMMENT\": {\"severity\": 1, \"check\": \"comment_regex\", \"pattern\": \"\\\\b(not implemented|unimplemented|placeholder|fixme|tbd|wip)\\\\b\", \"icase\": true, \"suppression_pattern\": \"^\\\\s*//\\\\s*CEP:\"}}}",
+   "files": {
+    "a.rs": "// not implemented yet\nlet x = 1;\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-PLACEHOLDER-COMMENT": 1
+   }
+  },
+  {
+   "name": "placeholder_word_in_cep_comment_is_suppressed",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-PLACEHOLDER-COMMENT\": {\"severity\": 1, \"check\": \"comment_regex\", \"pattern\": \"\\\\b(not implemented|unimplemented|placeholder|fixme|tbd|wip)\\\\b\", \"icase\": true, \"suppression_pattern\": \"^\\\\s*//\\\\s*CEP:\"}}}",
+   "files": {
+    "a.rs": "// CEP: the value maps to the fixed fallback\nlet x = 1;\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "placeholder_word_in_string_literal_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-PLACEHOLDER-TEXT\": {\"severity\": 1, \"check\": \"string_literal_regex\", \"pattern\": \"\\\\b(not implemented|unimplemented|placeholder|tbd)\\\\b\", \"icase\": true}}}",
+   "files": {
+    "a.rs": "let s = \"tbd\";\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-PLACEHOLDER-TEXT": 1
+   }
+  },
+  {
+   "name": "plain_string_literal_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-PLACEHOLDER-TEXT\": {\"severity\": 1, \"check\": \"string_literal_regex\", \"pattern\": \"\\\\b(not implemented|unimplemented|placeholder|tbd)\\\\b\", \"icase\": true}}}",
+   "files": {
+    "a.rs": "let s = \"ready\";\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "unsanctioned_numeric_literal_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-MAGIC-NUMBER\": {\"severity\": 2, \"check\": \"numeric_literal_policy\", \"allowed_values\": [0, 1], \"exempt_contexts\": [\"const\", \"static\", \"enum\", \"assert\", \"test\", \"derive\", \"cfg\"]}}}",
+   "files": {
+    "a.rs": "pub fn f() -> u32 {\n    let a = 42;\n    a\n}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-MAGIC-NUMBER": 1
+   }
+  },
+  {
+   "name": "const_context_literal_is_exempt",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-MAGIC-NUMBER\": {\"severity\": 2, \"check\": \"numeric_literal_policy\", \"allowed_values\": [0, 1], \"exempt_contexts\": [\"const\", \"static\", \"enum\", \"assert\", \"test\", \"derive\", \"cfg\"]}}}",
+   "files": {
+    "a.rs": "const ANSWER: u32 = 42;\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "unprefixed_macros_are_flagged_in_both_dialects",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-MACRO-PREFIX\": {\"severity\": 2, \"check\": \"macro_prefix_policy\", \"name_pattern\": \"^CEP_\", \"guard_pattern\": \"^[A-Z][A-Z0-9_]*_H(PP|XX)?$\"}}}",
+   "files": {
+    "a.rs": "#define MAX 4096\nmacro_rules! inner {\n    () => {};\n}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-MACRO-PREFIX": 2
+   }
+  },
+  {
+   "name": "prefixed_and_guarded_macros_are_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-MACRO-PREFIX\": {\"severity\": 2, \"check\": \"macro_prefix_policy\", \"name_pattern\": \"^CEP_\", \"guard_pattern\": \"^[A-Z][A-Z0-9_]*_H(PP|XX)?$\"}}}",
+   "files": {
+    "a.rs": "#define CEP_TARGET_CACHE_LINE_BYTES 64\n#define GUARD_HPP\nmacro_rules! CEP_outer {\n    () => {};\n}\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "banned_token_in_cep0_file_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-HOT-BANNED\": {\"severity\": 0, \"check\": \"banned_token_policy\", \"applies_to_classes\": [\"CEP-0\", \"HPC-0\", \"RCS-0\"], \"class_field\": \"CEP:CLASS\", \"enforce\": true, \"tokens\": [\".unwrap()\", \".expect(\", \"panic!(\", \"todo!(\", \"unimplemented!\", \"Box::new\", \"Vec::new\", \"String::new\", \"format!(\", \"println!(\", \"eprintln!\", \"std::time::Instant\", \"dyn \", \"Rc::new\", \"Arc::new\", \"Mutex::new\", \"RwLock::new\", \".clone()\", \"thread::spawn\"]}}}",
+   "files": {
+    "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-0\n// CEP:STATUS: complete\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\npub fn f() -> u32 {\n    let v = Vec::new;\n    1\n}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-HOT-BANNED": 1
+   }
+  },
+  {
+   "name": "cep0_file_without_banned_tokens_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-HOT-BANNED\": {\"severity\": 0, \"check\": \"banned_token_policy\", \"applies_to_classes\": [\"CEP-0\", \"HPC-0\", \"RCS-0\"], \"class_field\": \"CEP:CLASS\", \"enforce\": true, \"tokens\": [\".unwrap()\", \".expect(\", \"panic!(\", \"todo!(\", \"unimplemented!\", \"Box::new\", \"Vec::new\", \"String::new\", \"format!(\", \"println!(\", \"eprintln!\", \"std::time::Instant\", \"dyn \", \"Rc::new\", \"Arc::new\", \"Mutex::new\", \"RwLock::new\", \".clone()\", \"thread::spawn\"]}}}",
+   "files": {
+    "a.rs": "// CEP:FILE: a.rs\n// CEP:WHAT: v\n// CEP:WHY: v\n// CEP:CLASS: CEP-0\n// CEP:STATUS: complete\n// CEP:FAILURE: none\n// CEP:ASSUMES: none\n// CEP:COST: cold.\n// CEP:EVIDENCE: t.\npub fn f() -> u32 {\n    let a = 1;\n    let b = 2;\n    a + b\n}\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "empty_body_in_complete_fn_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STUB-BODY\": {\"severity\": 1, \"check\": \"function_policy\", \"mode\": \"stub_body\", \"suppress_statuses\": [\"stub\", \"partial\", \"placeholder\"]}}}",
+   "files": {
+    "a.rs": "/// CEP:WHAT: v\n/// CEP:WHY: v\n/// CEP:STATUS: complete\n/// CEP:FAILURE: v\n/// CEP:ASSUMES: v\n/// CEP:COST: v\n/// CEP:EVIDENCE: v\npub fn f() {\n}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-STUB-BODY": 1
+   }
+  },
+  {
+   "name": "empty_body_in_stub_fn_is_suppressed",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-STUB-BODY\": {\"severity\": 1, \"check\": \"function_policy\", \"mode\": \"stub_body\", \"suppress_statuses\": [\"stub\", \"partial\", \"placeholder\"]}}}",
+   "files": {
+    "a.rs": "/// CEP:WHAT: v\n/// CEP:WHY: v\n/// CEP:STATUS: stub\n/// CEP:FAILURE: v\n/// CEP:ASSUMES: v\n/// CEP:COST: v\n/// CEP:EVIDENCE: v\npub fn f() {\n}\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "empty_catch_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-EMPTY-CATCH\": {\"severity\": 1, \"check\": \"flat_code_regex\", \"pattern\": \"catch\\\\s*\\\\([^)]*\\\\)\\\\s*\\\\{\\\\s*\\\\}\"}}}",
+   "files": {
+    "a.hpp": "try { g(); } catch (E) {}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-EMPTY-CATCH": 1
+   }
+  },
+  {
+   "name": "catch_with_body_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-EMPTY-CATCH\": {\"severity\": 1, \"check\": \"flat_code_regex\", \"pattern\": \"catch\\\\s*\\\\([^)]*\\\\)\\\\s*\\\\{\\\\s*\\\\}\"}}}",
+   "files": {
+    "a.hpp": "try { g(); } catch (E) { log(E); }\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "empty_branch_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-EMPTY-BRANCH\": {\"severity\": 2, \"check\": \"flat_code_regex\", \"pattern\": \"\\\\b(if|else|for|while|match)[^{]*\\\\{\\\\s*\\\\}\"}}}",
+   "files": {
+    "a.rs": "pub fn f(x: u32) -> u32 {\n    if (x) {}\n    x\n}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-EMPTY-BRANCH": 1
+   }
+  },
+  {
+   "name": "constant_return_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-CONSTANT-RETURN\": {\"severity\": 2, \"check\": \"function_policy\", \"mode\": \"constant_return\", \"pattern\": \"^return (true|false|nullptr);$\"}}}",
+   "files": {
+    "a.hpp": "bool f() {\n    return nullptr;\n}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-CONSTANT-RETURN": 1
+   }
+  },
+  {
+   "name": "computed_return_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-CONSTANT-RETURN\": {\"severity\": 2, \"check\": \"function_policy\", \"mode\": \"constant_return\", \"pattern\": \"^return (true|false|nullptr);$\"}}}",
+   "files": {
+    "a.hpp": "bool f(int x) {\n    return x > 0;\n}\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "lowercase_type_name_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-NAMING-TYPE\": {\"severity\": 2, \"check\": \"flat_code_regex\", \"pattern\": \"\\\\b(struct|enum)\\\\s+([A-Za-z_][A-Za-z0-9_]*)\", \"name_pattern\": \"^[A-Z][A-Za-z0-9]*$\"}}}",
+   "files": {
+    "a.hpp": "struct widget { int a; };\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-NAMING-TYPE": 1
+   }
+  },
+  {
+   "name": "pascal_type_name_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-NAMING-TYPE\": {\"severity\": 2, \"check\": \"flat_code_regex\", \"pattern\": \"\\\\b(struct|enum)\\\\s+([A-Za-z_][A-Za-z0-9_]*)\", \"name_pattern\": \"^[A-Z][A-Za-z0-9]*$\"}}}",
+   "files": {
+    "a.hpp": "struct Widget { int a; };\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "uppercase_fn_name_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-NAMING-FUNC\": {\"severity\": 2, \"check\": \"function_policy\", \"mode\": \"naming\", \"name_pattern\": \"^[a-z][a-z0-9_]*$\"}}}",
+   "files": {
+    "a.rs": "pub fn BadName(x: u32) -> u32 {\n    let a = x;\n    a\n}\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-NAMING-FUNC": 1
+   }
+  },
+  {
+   "name": "snake_fn_name_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-NAMING-FUNC\": {\"severity\": 2, \"check\": \"function_policy\", \"mode\": \"naming\", \"name_pattern\": \"^[a-z][a-z0-9_]*$\"}}}",
+   "files": {
+    "a.rs": "pub fn good_name(x: u32) -> u32 {\n    let a = x;\n    a\n}\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "commented_out_code_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-COMMENTED-CODE\": {\"severity\": 2, \"check\": \"comment_regex\", \"pattern\": \"^\\\\s*//\\\\s*(let |fn |if |for |while |return |pub )\", \"suppression_pattern\": \"CEP:\"}}}",
+   "files": {
+    "a.rs": "// let x = 1;\nlet y = 2;\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-COMMENTED-CODE": 1
+   }
+  },
+  {
+   "name": "cep_annotated_comment_is_suppressed",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-COMMENTED-CODE\": {\"severity\": 2, \"check\": \"comment_regex\", \"pattern\": \"^\\\\s*//\\\\s*(let |fn |if |for |while |return |pub )\", \"suppression_pattern\": \"CEP:\"}}}",
+   "files": {
+    "a.rs": "// CEP: the let form below is the documented shape\nlet y = 2;\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "doc_sync_agreement_is_clean",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}}}",
+   "files": {
+    "a.rs": "let x = 1;\n"
+   },
+   "doc": {
+    "path": "standard.md",
+    "text": "# T\nVersion: **0.3**\n### Rule CEP-LINT-DOC-SYNC\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "doc_sync_version_mismatch_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}}}",
+   "files": {
+    "a.rs": "let x = 1;\n"
+   },
+   "doc": {
+    "path": "standard.md",
+    "text": "# T\nVersion: **0.2**\n### Rule CEP-LINT-DOC-SYNC\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-DOC-SYNC": 1
+   }
+  },
+  {
+   "name": "doc_sync_missing_version_line_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}}}",
+   "files": {
+    "a.rs": "let x = 1;\n"
+   },
+   "doc": {
+    "path": "standard.md",
+    "text": "# T\n### Rule CEP-LINT-DOC-SYNC\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-DOC-SYNC": 1
+   }
+  },
+  {
+   "name": "doc_sync_documented_rule_without_configuration_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}}}",
+   "files": {
+    "a.rs": "let x = 1;\n"
+   },
+   "doc": {
+    "path": "standard.md",
+    "text": "# T\nVersion: **0.3**\n### Rule CEP-LINT-DOC-SYNC\n### Rule CEP-LINT-GHOST\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-DOC-SYNC": 1
+   }
+  },
+  {
+   "name": "doc_sync_configured_rule_without_heading_is_flagged",
+   "config": "{\"standard\": {\"name\": \"CEP&CC\", \"version\": \"0.3\", \"source\": \"standard.md\"}, \"file_globs\": [\"**/*\", \"*\"], \"rules\": {\"CEP-LINT-DOC-SYNC\": {\"severity\": 1, \"check\": \"doc_rule_coverage\", \"doc_path\": \"standard.md\", \"heading_pattern\": \"^### Rule (CEP-LINT-[A-Z-]+)$\"}, \"CEP-LINT-GHOST\": {\"severity\": 2, \"check\": \"comment_regex\", \"pattern\": \"\\\\bGHOST\\\\b\"}}}",
+   "files": {
+    "a.rs": "let x = 1;\n"
+   },
+   "doc": {
+    "path": "standard.md",
+    "text": "# T\nVersion: **0.3**\n### Rule CEP-LINT-DOC-SYNC\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-DOC-SYNC": 1
+   }
+  },
+  {
+   "name": "atomic_file_line_limit_over_budget_is_flagged",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-ATOMIC-FILE\":{\"severity\":1,\"check\":\"file_topology_policy\",\"class_line_limits\":{\"CEP-0\":10},\"banned_name_stems\":[\"util\",\"helper\",\"misc\",\"common\"],\"passes_globs\":[\"**/passes/**\"],\"pass_registration_pattern\":\"register_pass!\",\"max_registrations_per_file\":1,\"isel_globs\":[\"**/targets/*/isel/**\"],\"isel_category_pattern\":\"isel-category:\\\\s*([a-z0-9_]+)\",\"max_isel_categories_per_file\":1,\"generated_pattern\":\"deterministically generated\"}}}",
+   "files": {
+    "a.rs": "// CEP:CLASS: CEP-0\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-ATOMIC-FILE": 1
+   }
+  },
+  {
+   "name": "atomic_file_line_limit_within_budget_is_clean",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-ATOMIC-FILE\":{\"severity\":1,\"check\":\"file_topology_policy\",\"class_line_limits\":{\"CEP-0\":10},\"banned_name_stems\":[\"util\",\"helper\",\"misc\",\"common\"],\"passes_globs\":[\"**/passes/**\"],\"pass_registration_pattern\":\"register_pass!\",\"max_registrations_per_file\":1,\"isel_globs\":[\"**/targets/*/isel/**\"],\"isel_category_pattern\":\"isel-category:\\\\s*([a-z0-9_]+)\",\"max_isel_categories_per_file\":1,\"generated_pattern\":\"deterministically generated\"}}}",
+   "files": {
+    "a.rs": "// CEP:CLASS: CEP-0\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "atomic_file_generated_marker_exempts_the_limit",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-ATOMIC-FILE\":{\"severity\":1,\"check\":\"file_topology_policy\",\"class_line_limits\":{\"CEP-0\":10},\"banned_name_stems\":[\"util\",\"helper\",\"misc\",\"common\"],\"passes_globs\":[\"**/passes/**\"],\"pass_registration_pattern\":\"register_pass!\",\"max_registrations_per_file\":1,\"isel_globs\":[\"**/targets/*/isel/**\"],\"isel_category_pattern\":\"isel-category:\\\\s*([a-z0-9_]+)\",\"max_isel_categories_per_file\":1,\"generated_pattern\":\"deterministically generated\"}}}",
+   "files": {
+    "a.rs": "// deterministically generated by tools/gen\n// CEP:CLASS: CEP-0\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\nlet x = 1;\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "atomic_file_junk_drawer_name_is_flagged",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-ATOMIC-FILE\":{\"severity\":1,\"check\":\"file_topology_policy\",\"class_line_limits\":{\"CEP-0\":10},\"banned_name_stems\":[\"util\",\"helper\",\"misc\",\"common\"],\"passes_globs\":[\"**/passes/**\"],\"pass_registration_pattern\":\"register_pass!\",\"max_registrations_per_file\":1,\"isel_globs\":[\"**/targets/*/isel/**\"],\"isel_category_pattern\":\"isel-category:\\\\s*([a-z0-9_]+)\",\"max_isel_categories_per_file\":1,\"generated_pattern\":\"deterministically generated\"}}}",
+   "files": {
+    "string_utils.rs": "let x = 1;\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-ATOMIC-FILE": 1
+   }
+  },
+  {
+   "name": "atomic_file_explicit_name_is_clean",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-ATOMIC-FILE\":{\"severity\":1,\"check\":\"file_topology_policy\",\"class_line_limits\":{\"CEP-0\":10},\"banned_name_stems\":[\"util\",\"helper\",\"misc\",\"common\"],\"passes_globs\":[\"**/passes/**\"],\"pass_registration_pattern\":\"register_pass!\",\"max_registrations_per_file\":1,\"isel_globs\":[\"**/targets/*/isel/**\"],\"isel_category_pattern\":\"isel-category:\\\\s*([a-z0-9_]+)\",\"max_isel_categories_per_file\":1,\"generated_pattern\":\"deterministically generated\"}}}",
+   "files": {
+    "string_hash.rs": "let x = 1;\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "atomic_file_pass_landfill_is_flagged",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-ATOMIC-FILE\":{\"severity\":1,\"check\":\"file_topology_policy\",\"class_line_limits\":{\"CEP-0\":10},\"banned_name_stems\":[\"util\",\"helper\",\"misc\",\"common\"],\"passes_globs\":[\"**/passes/**\"],\"pass_registration_pattern\":\"register_pass!\",\"max_registrations_per_file\":1,\"isel_globs\":[\"**/targets/*/isel/**\"],\"isel_category_pattern\":\"isel-category:\\\\s*([a-z0-9_]+)\",\"max_isel_categories_per_file\":1,\"generated_pattern\":\"deterministically generated\"}}}",
+   "files": {
+    "passes/licm.rs": "register_pass!(licm);\nregister_pass!(loop_fusion);\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-ATOMIC-FILE": 1
+   }
+  },
+  {
+   "name": "atomic_file_single_pass_registration_is_clean",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-ATOMIC-FILE\":{\"severity\":1,\"check\":\"file_topology_policy\",\"class_line_limits\":{\"CEP-0\":10},\"banned_name_stems\":[\"util\",\"helper\",\"misc\",\"common\"],\"passes_globs\":[\"**/passes/**\"],\"pass_registration_pattern\":\"register_pass!\",\"max_registrations_per_file\":1,\"isel_globs\":[\"**/targets/*/isel/**\"],\"isel_category_pattern\":\"isel-category:\\\\s*([a-z0-9_]+)\",\"max_isel_categories_per_file\":1,\"generated_pattern\":\"deterministically generated\"}}}",
+   "files": {
+    "passes/licm.rs": "register_pass!(licm);\n"
+   },
+   "expect_findings": {}
+  },
+  {
+   "name": "atomic_file_isel_multi_category_is_flagged",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-ATOMIC-FILE\":{\"severity\":1,\"check\":\"file_topology_policy\",\"class_line_limits\":{\"CEP-0\":10},\"banned_name_stems\":[\"util\",\"helper\",\"misc\",\"common\"],\"passes_globs\":[\"**/passes/**\"],\"pass_registration_pattern\":\"register_pass!\",\"max_registrations_per_file\":1,\"isel_globs\":[\"**/targets/*/isel/**\"],\"isel_category_pattern\":\"isel-category:\\\\s*([a-z0-9_]+)\",\"max_isel_categories_per_file\":1,\"generated_pattern\":\"deterministically generated\"}}}",
+   "files": {
+    "targets/x86/isel/arithmetic.rs": "// isel-category: arithmetic\nselect(n);\n// isel-category: simd\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-ATOMIC-FILE": 1
+   }
+  },
+  {
+   "name": "atomic_file_isel_single_category_is_clean",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-ATOMIC-FILE\":{\"severity\":1,\"check\":\"file_topology_policy\",\"class_line_limits\":{\"CEP-0\":10},\"banned_name_stems\":[\"util\",\"helper\",\"misc\",\"common\"],\"passes_globs\":[\"**/passes/**\"],\"pass_registration_pattern\":\"register_pass!\",\"max_registrations_per_file\":1,\"isel_globs\":[\"**/targets/*/isel/**\"],\"isel_category_pattern\":\"isel-category:\\\\s*([a-z0-9_]+)\",\"max_isel_categories_per_file\":1,\"generated_pattern\":\"deterministically generated\"}}}",
+   "files": {
+    "targets/x86/isel/arithmetic.rs": "// isel-category: arithmetic\nselect(n);\n"
+   },
+   "expect_findings": {}
+  }
+ ]
 }

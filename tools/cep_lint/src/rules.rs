@@ -1,8 +1,9 @@
 // CEP:FILE: tools/cep_lint/src/rules.rs
-// CEP:WHAT: Every configured check as a pure function over the scanned file: file-header
+// CEP:WHAT: The block-schema and topology checks over the scanned file: file-header
 //   schema, function and public-item CEP blocks, status vocabulary, stub declarations,
-//   comment regexes, string-literal markers, numeric literal policy, banned hot-path
-//   tokens, empty bodies and branches, naming conventions, and CEP key vocabulary.
+//   macro naming, CEP key vocabulary, and the atomic-file topology policy (line limits,
+//   junk-drawer names, pass registration, ISEL partitioning).  The line-text family lives
+//   in checks_text.rs.
 // CEP:WHY: Rules are driven entirely by .cep/cep_lint.json (id, severity, parameters), so
 //   policy changes never require engine changes; the implementations below only encode the
 //   mechanical meaning of each check kind.
@@ -24,12 +25,11 @@
 // CEP:SECURITY: budgets bound line and window sizes; regex evaluation is step-budgeted by
 //   the regexlite engine, so untrusted file content cannot stall the run (38.12, 38.13).
 
-use crate::config::{Config, Rule};
+use crate::checks_text;
+use crate::config::{glob_match, Config, Rule};
 use crate::regexlite::Regex;
 use crate::scan::FileScan;
 
-/// Lines of context examined when classifying an exemption window (standard: twelve).
-const EXEMPTION_WINDOW_LINES: usize = 12;
 
 /// CEP:WHAT: Per-file rule evaluation context: the repo-relative path and the scanned file.
 /// CEP:WHY: Rules are pure functions over one structural view, so findings are reproducible
@@ -117,69 +117,29 @@ pub fn run_file_rules(config: &Config, path: &str, scan: &FileScan) -> Vec<Findi
                 Some("constant_return") => findings.extend(constant_return(rule, &ctx)),
                 _ => {}
             },
-            "comment_regex" => findings.extend(comment_regex(rule, &ctx)),
-            "string_literal_regex" => findings.extend(string_literal_regex(rule, &ctx)),
-            "numeric_literal_policy" => findings.extend(numeric_literals(rule, &ctx)),
+            "comment_regex" => findings.extend(checks_text::comment_regex(rule, &ctx)),
+            "string_literal_regex" => findings.extend(checks_text::string_literal_regex(rule, &ctx)),
+            "numeric_literal_policy" => findings.extend(checks_text::numeric_literals(rule, &ctx)),
             "banned_token_policy" => {
                 if rule.enforce {
-                    findings.extend(banned_tokens(rule, &ctx));
+                    findings.extend(checks_text::banned_tokens(rule, &ctx));
                 }
             }
-            "flat_code_regex" => findings.extend(flat_code_regex(rule, &ctx)),
+            "flat_code_regex" => findings.extend(checks_text::flat_code_regex(rule, &ctx)),
             "macro_prefix_policy" => findings.extend(macro_prefix(rule, &ctx)),
             "key_vocabulary" => findings.extend(key_vocabulary(rule, &ctx)),
+            "file_topology_policy" => findings.extend(file_topology(rule, &ctx)),
             _ => {}
         }
     }
     findings
 }
 
-fn compile(rule: &Rule, pattern: &str) -> Option<Regex> {
+pub(crate) fn compile(rule: &Rule, pattern: &str) -> Option<Regex> {
     Regex::new(pattern, rule.icase).ok()
 }
 
-/// Joined code text of the bounded window around a 1-based line, for context exemptions.
-fn window_text(scan: &FileScan, line: usize) -> String {
-    let lo = line.saturating_sub(EXEMPTION_WINDOW_LINES).max(1);
-    let hi = (line + EXEMPTION_WINDOW_LINES).min(scan.line_count);
-    let mut text = String::new();
-    for li in lo..=hi {
-        if let Some(code_line) = scan.code.get(li - 1) {
-            text.push_str(code_line);
-            text.push('\n');
-        }
-    }
-    text
-}
-
-/// Whole-word containment check (identifier boundaries on both sides).
-fn word_contains(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let hay: Vec<char> = haystack.chars().collect();
-    let needle_chars: Vec<char> = needle.chars().collect();
-    let n = needle_chars.len();
-    if n > hay.len() {
-        return false;
-    }
-    for start in 0..=(hay.len() - n) {
-        if hay[start..start + n]
-            .iter()
-            .zip(needle_chars.iter())
-            .all(|(a, b)| a == b)
-        {
-            let before_ok = start == 0 || !is_word_char(hay[start - 1]);
-            let after_ok = start + n == hay.len() || !is_word_char(hay[start + n]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn is_word_char(c: char) -> bool {
+pub(crate) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
@@ -489,13 +449,13 @@ fn function_naming(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
     out
 }
 
-fn pattern_text(pattern: Option<&str>) -> String {
+pub(crate) fn pattern_text(pattern: Option<&str>) -> String {
     pattern.unwrap_or("(none)").to_string()
 }
 
 /// CONSTANT-RETURN: literal-constant return statements (C-family stand-in returns).
 fn constant_return(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
-    pattern_line_rule(rule, ctx)
+    checks_text::pattern_line_rule(rule, ctx)
 }
 
 /// MACRO-PREFIX: macro definitions must carry the configured name prefix.
@@ -577,401 +537,6 @@ fn macro_definition_name(line: &str) -> Option<String> {
     }
 }
 
-/// EMPTY-CATCH / EMPTY-BRANCH: flat code regex over comment/string-stripped lines.
-fn flat_code_regex(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
-    let pattern = match rule.pattern.as_deref() {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    let re = match compile(rule, pattern) {
-        Some(re) => re,
-        None => return Vec::new(),
-    };
-    let name_re = rule.name_pattern.as_deref().and_then(|p| Regex::new(p, false).ok());
-    let mut out = Vec::new();
-    for (idx, code_line) in ctx.scan.code.iter().enumerate() {
-        let candidates = [code_line.as_str(), code_line.trim()];
-        let mut matched = None;
-        for candidate in candidates {
-            if let Some(m) = re.find(candidate) {
-                matched = Some(m);
-                break;
-            }
-        }
-        if let Some(m) = matched {
-            if let (Some(name_re), Some(group)) = (name_re.as_ref(), m.groups.get(2)) {
-                let span = match group {
-                    Some((start, end)) if end >= start => (*start, *end),
-                    _ => continue,
-                };
-                let chars: Vec<char> = code_line.chars().collect();
-                if span.1 <= chars.len() {
-                    let name: String = chars[span.0..span.1].iter().collect();
-                    if !name_re.is_match(&name) {
-                        out.push(Finding::new(
-                            rule.severity,
-                            ctx.path,
-                            idx + 1,
-                            &rule.id,
-                            format!(
-                                "name '{}' does not match the configured convention {}",
-                                name,
-                                pattern_text(rule.name_pattern.as_deref())
-                            ),
-                        ));
-                    }
-                }
-            } else {
-                out.push(Finding::new(
-                    rule.severity,
-                    ctx.path,
-                    idx + 1,
-                    &rule.id,
-                    "code matches the configured banned flat pattern".to_string(),
-                ));
-            }
-        }
-    }
-    out
-}
-
-/// Generic anchored/unanchored code-line pattern (used by constant-return).
-fn pattern_line_rule(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
-    let pattern = match rule.pattern.as_deref() {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    let re = match compile(rule, pattern) {
-        Some(re) => re,
-        None => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for (idx, code_line) in ctx.scan.code.iter().enumerate() {
-        if re.is_match(code_line) || re.is_match(code_line.trim()) {
-            out.push(Finding::new(
-                rule.severity,
-                ctx.path,
-                idx + 1,
-                &rule.id,
-                "code matches the configured banned pattern".to_string(),
-            ));
-        }
-    }
-    out
-}
-
-/// The marker-word comment rules: regex over comment text with the
-/// rule's configured suppression. For the CEP-declaration suppression pattern (a rule whose
-/// suppression keys on `// CEP:` declarations), a line inside a CEP-keyed comment block, or
-/// referencing a marker the enclosing function's CEP block itself declares, is sanctioned.
-fn comment_regex(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
-    let pattern = match rule.pattern.as_deref() {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    let re = match compile(rule, pattern) {
-        Some(re) => re,
-        None => return Vec::new(),
-    };
-    let suppression = rule
-        .suppression_pattern
-        .as_deref()
-        .and_then(|p| Regex::new(p, rule.icase).ok());
-    let cep_declaration_suppression = rule
-        .suppression_pattern
-        .as_deref()
-        .map(|p| p.contains("CEP:"))
-        .unwrap_or(false);
-    let scan = ctx.scan;
-    let cep_block_lines = cep_block_line_set(scan);
-    let mut out = Vec::new();
-    for (idx, raw_line) in scan.raw_lines.iter().enumerate() {
-        let line_no = idx + 1;
-        let comment = match scan.comment_text.get(idx) {
-            Some(Some(text)) => text.as_str(),
-            _ => continue,
-        };
-        let marker_hit = re.is_match(raw_line) || re.find(comment).is_some();
-        if !marker_hit {
-            continue;
-        }
-        if let Some(sup) = suppression.as_ref() {
-            if sup.is_match(raw_line) {
-                continue;
-            }
-        }
-        if cep_declaration_suppression {
-            if scan.whole_comment.get(idx).copied().unwrap_or(false)
-                && cep_block_lines.contains(&line_no)
-            {
-                continue;
-            }
-            if let Some(doc) = scan.enclosing_fn_doc(line_no) {
-                if let Some(m) = re.find(comment) {
-                    let chars: Vec<char> = comment.chars().collect();
-                    if let Some((start, end)) = m.groups.first().and_then(|g| *g) {
-                        if end <= chars.len() {
-                            let marker: String = chars[start..end].iter().collect();
-                            if doc.to_lowercase().contains(&marker.to_lowercase()) {
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out.push(Finding::new(
-            rule.severity,
-            ctx.path,
-            line_no,
-            &rule.id,
-            "comment text matches the configured banned marker pattern".to_string(),
-        ));
-    }
-    out
-}
-
-/// Line numbers (1-based) that belong to a comment block containing at least one CEP key.
-fn cep_block_line_set(scan: &FileScan) -> Vec<usize> {
-    let mut lines = Vec::new();
-    for block in &scan.blocks {
-        if !block.keys.is_empty() {
-            for line in block.start..=block.end {
-                lines.push(line);
-            }
-        }
-    }
-    lines
-}
-
-/// MARKER-TEXT (string-literal regex rule): banned marker text in literals. Two sanctioned sites: a
-/// literal that constructs a loud failure (an Err/Error expression in the surrounding
-/// statement — the standard's fail-loudly clause), and cfg(test) fixture text, which is
-/// not a runtime message.
-fn string_literal_regex(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
-    let pattern = match rule.pattern.as_deref() {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    let re = match compile(rule, pattern) {
-        Some(re) => re,
-        None => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for (line, content) in &ctx.scan.strings {
-        if re.is_match(content) {
-            if ctx.scan.in_test(*line) || is_loud_failure_context(ctx.scan, *line) {
-                continue;
-            }
-            out.push(Finding::new(
-                rule.severity,
-                ctx.path,
-                *line,
-                &rule.id,
-                "string literal contains banned stub-marker text".to_string(),
-            ));
-        }
-    }
-    out
-}
-
-/// Whether the statement window around the line constructs an error (fail-loudly site).
-fn is_loud_failure_context(scan: &FileScan, line: usize) -> bool {
-    let window = window_text(scan, line);
-    window.contains("Err(") || window.contains("Error") || window.contains("ok_or")
-}
-
-/// MAGIC-NUMBER: numeric literals outside the allow-list, except in sanctioned contexts
-/// (const/static/enum declarations, assertion statements, cfg/derive/test attributes, and
-/// cfg(test) regions).
-fn numeric_literals(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
-    let allowed = parse_allowed_numbers(&rule.allowed_numbers);
-    if allowed.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let scan = ctx.scan;
-    for (idx, code_line) in scan.code.iter().enumerate() {
-        let line_no = idx + 1;
-        let chars: Vec<char> = code_line.chars().collect();
-        let mut ci = 0usize;
-        while ci < chars.len() {
-            let c = chars[ci];
-            if c.is_ascii_digit() && (ci == 0 || !is_word_char(chars[ci - 1])) {
-                let (token, consumed) = number_token(&chars, ci);
-                if let Some(value) = parse_number(&token) {
-                    let is_allowed = allowed.iter().any(|a| values_equal(a, &value));
-                    if !is_allowed && !literal_exempt(scan, rule, line_no) {
-                        out.push(Finding::new(
-                            rule.severity,
-                            ctx.path,
-                            line_no,
-                            &rule.id,
-                            format!("numeric literal '{}' is outside the allow-list", token),
-                        ));
-                    }
-                }
-                ci += consumed.max(1);
-            } else {
-                ci += 1;
-            }
-        }
-    }
-    out
-}
-
-fn literal_exempt(scan: &FileScan, rule: &Rule, line_no: usize) -> bool {
-    if scan.in_test(line_no) && rule.exempt_contexts.iter().any(|c| c == "test") {
-        return true;
-    }
-    let window = window_text(scan, line_no);
-    rule.exempt_contexts
-        .iter()
-        .any(|context| word_contains(&window, context))
-}
-
-/// Consumes a numeric literal token starting at a digit; returns (token, chars consumed).
-fn number_token(chars: &[char], start: usize) -> (String, usize) {
-    let mut i = start;
-    let mut token = String::new();
-    if chars.get(i) == Some(&'0')
-        && matches!(chars.get(i + 1), Some('x') | Some('X') | Some('o') | Some('O') | Some('b') | Some('B'))
-    {
-        token.push(chars[i]);
-        token.push(chars[i + 1]);
-        i += 2;
-        while i < chars.len() && (is_word_char(chars[i]) || chars[i] == '\'') {
-            token.push(chars[i]);
-            i += 1;
-        }
-        return (token, i - start);
-    }
-    while i < chars.len()
-        && (chars[i].is_ascii_digit() || chars[i] == '_' || chars[i] == '\'')
-    {
-        token.push(chars[i]);
-        i += 1;
-    }
-    if i < chars.len() && chars[i] == '.' {
-        token.push('.');
-        i += 1;
-        while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
-            token.push(chars[i]);
-            i += 1;
-        }
-    }
-    if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
-        let mut j = i + 1;
-        if matches!(chars.get(j), Some('+') | Some('-')) {
-            j += 1;
-        }
-        if chars.get(j).map(|c| c.is_ascii_digit()).unwrap_or(false) {
-            token.push(chars[i]);
-            i += 1;
-            if i < chars.len() && matches!(chars[i], '+' | '-') {
-                token.push(chars[i]);
-                i += 1;
-            }
-            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
-                token.push(chars[i]);
-                i += 1;
-            }
-        }
-    }
-    while i < chars.len() && chars[i].is_alphanumeric() {
-        token.push(chars[i]);
-        i += 1;
-    }
-    (token, i - start)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum NumericValue {
-    Int(u128),
-    Float(f64),
-}
-
-fn parse_allowed_numbers(specs: &[String]) -> Vec<NumericValue> {
-    specs.iter().filter_map(|s| parse_number(s)).collect()
-}
-
-/// Parses a Rust-style numeric literal token (underscores, prefixes, suffixes, floats).
-fn parse_number(token: &str) -> Option<NumericValue> {
-    let cleaned: String = token.chars().filter(|c| *c != '_' && *c != '\'').collect();
-    let cleaned = cleaned.trim();
-    if cleaned.is_empty() {
-        return None;
-    }
-    let (body, _suffix) = split_suffix(cleaned);
-    if let Some(rest) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-        return u128::from_str_radix(rest, 16).ok().map(NumericValue::Int);
-    }
-    if let Some(rest) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
-        return u128::from_str_radix(rest, 8).ok().map(NumericValue::Int);
-    }
-    if let Some(rest) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
-        return u128::from_str_radix(rest, 2).ok().map(NumericValue::Int);
-    }
-    if body.contains('.') || body.contains('e') || body.contains('E') {
-        return body.parse::<f64>().ok().map(NumericValue::Float);
-    }
-    body.parse::<u128>().ok().map(NumericValue::Int)
-}
-
-fn split_suffix(cleaned: &str) -> (&str, &str) {
-    let split_at = cleaned
-        .char_indices()
-        .find(|(idx, c)| !c.is_ascii_digit() && *c != '.' && *c != 'e' && *c != 'E'
-            && !(*c == '+' || *c == '-') && !is_exponent_tail(cleaned, *idx))
-        .map(|(idx, _)| idx);
-    match split_at {
-        Some(idx) if idx > 0 => (&cleaned[..idx], &cleaned[idx..]),
-        _ => (cleaned, ""),
-    }
-}
-
-fn is_exponent_tail(_text: &str, _idx: usize) -> bool {
-    false
-}
-
-fn values_equal(a: &NumericValue, b: &NumericValue) -> bool {
-    match (a, b) {
-        (NumericValue::Int(x), NumericValue::Int(y)) => x == y,
-        (NumericValue::Float(x), NumericValue::Float(y)) => x == y,
-        (NumericValue::Int(x), NumericValue::Float(y))
-        | (NumericValue::Float(y), NumericValue::Int(x)) => (*x as f64) == *y,
-    }
-}
-
-/// HOT-BANNED: banned tokens in class-0 files (only when the config sets enforce).
-fn banned_tokens(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
-    let class = match &ctx.scan.class {
-        Some(class) => class.clone(),
-        None => return Vec::new(),
-    };
-    if !rule.applies_to_classes.contains(&class) {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for (idx, code_line) in ctx.scan.code.iter().enumerate() {
-        if ctx.scan.in_test(idx + 1) {
-            continue;
-        }
-        for token in &rule.tokens {
-            if code_line.contains(token.as_str()) {
-                out.push(Finding::new(
-                    rule.severity,
-                    ctx.path,
-                    idx + 1,
-                    &rule.id,
-                    format!("banned token '{}' in class-{} file", token, class),
-                ));
-            }
-        }
-    }
-    out
-}
-
 /// R6 (optional): CEP keys outside the configured vocabulary.
 fn key_vocabulary(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
     let allowed = match &rule.allowed_fields {
@@ -995,6 +560,180 @@ fn key_vocabulary(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
     out
 }
 
+/// Opening lines searched for the generated-code marker (62.5.1's exemption).
+const GENERATED_MARKER_SCAN_LINES: usize = 20;
+
+/// CEP:WHAT: The atomic-file topology check (CEP&CC 0.4 chapter 62): per-class line
+///   limits (62.5.1), the junk-drawer filename ban (62.4), the one-pass-per-file cap
+///   under the configured passes topology (62.3.1), and the ISEL category cap under the
+///   configured targets/*/isel topology (62.3.3).
+/// CEP:WHY: Chapter 62 makes the file - not the function - the atomic unit of review and
+///   enforcement; 62.5.3 requires cep_lint to enforce the four duties mechanically.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: findings are file-level (line 1) for the limit and name duties and sit at
+///   the first over-budget registration or category line for the topology duties;
+///   pattern-compile failures degrade to no findings (rejected at config validation).
+/// CEP:ASSUMES: class_line_limits names exactly the classes the standard bounds; the
+///   generated-code exemption is the generated_pattern marker inside the file's opening
+///   lines; the topology duties fire only under the configured globs (this repository's
+///   flat backend matches none of them).
+/// CEP:COST: O(lines) per file for the scan-backed duties; the name and class duties are
+///   O(stems + limits).
+/// CEP:EVIDENCE: rules::tests atomic_file fixtures cover all four duties, the generated
+///   exemption, and the compliant shapes; the self-test manifest carries one violating
+///   and one compliant scenario per duty.
+pub(crate) fn file_topology(rule: &Rule, ctx: &FileContext) -> Vec<Finding> {
+    let mut out = Vec::new();
+    // Duty 1 (62.5.1): the declared class must respect its configured line limit,
+    // unless the file carries the generated-code marker (62.5.1's exception).
+    let generated_exempt = rule
+        .generated_pattern
+        .as_deref()
+        .and_then(|p| Regex::new(p, false).ok())
+        .map(|re| {
+            ctx.scan
+                .raw_lines
+                .iter()
+                .take(GENERATED_MARKER_SCAN_LINES)
+                .any(|line| re.is_match(line))
+        })
+        .unwrap_or(false);
+    if !generated_exempt {
+        if let Some(class) = ctx.scan.class.as_deref() {
+            if let Some(&(_, max)) = rule
+                .class_line_limits
+                .iter()
+                .find(|(name, _)| name == class)
+            {
+                // wc-style line count: the phantom trailing element of a newline-
+                // terminated source is not a line (62.5.1 counts translation-unit lines).
+                let mut count = ctx.scan.line_count as u64;
+                if ctx
+                    .scan
+                    .raw_lines
+                    .last()
+                    .map(|line| line.is_empty())
+                    .unwrap_or(false)
+                {
+                    count -= 1;
+                }
+                if count > max {
+                    out.push(Finding::new(
+                        rule.severity,
+                        ctx.path,
+                        1,
+                        &rule.id,
+                        format!(
+                            "file has {} lines, exceeding the {}-line limit for class {}",
+                            count, max, class
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    // Duty 2 (62.4): the file stem must not contain a banned junk-drawer stem.
+    let stem = file_stem(ctx.path);
+    for banned in &rule.banned_name_stems {
+        if !banned.is_empty() && stem.contains(&banned.to_lowercase()) {
+            out.push(Finding::new(
+                rule.severity,
+                ctx.path,
+                1,
+                &rule.id,
+                format!(
+                    "file name stem '{}' contains the banned junk-drawer stem '{}' (62.4)",
+                    stem, banned
+                ),
+            ));
+            break;
+        }
+    }
+    // Duty 3 (62.3.1, 62.5.3): at most max_registrations_per_file pass registrations
+    // under the configured passes topology.
+    if rule.passes_globs.iter().any(|g| glob_match(g, ctx.path)) {
+        if let Some(re) = rule
+            .pass_registration_pattern
+            .as_deref()
+            .and_then(|p| Regex::new(p, false).ok())
+        {
+            let mut count = 0u64;
+            for (idx, code_line) in ctx.scan.code.iter().enumerate() {
+                if re.is_match(code_line) {
+                    count += 1;
+                    if count == rule.max_registrations_per_file + 1 {
+                        out.push(Finding::new(
+                            rule.severity,
+                            ctx.path,
+                            idx + 1,
+                            &rule.id,
+                            format!(
+                                "file registers more than {} optimization pass(es) (62.3.1)",
+                                rule.max_registrations_per_file
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // Duty 4 (62.3.3, 62.5.3): at most max_isel_categories_per_file distinct ISEL
+    // categories under the configured isel topology; categories are the capture of
+    // isel_category_pattern over whole lines because the spec's tags live in comments.
+    if rule.isel_globs.iter().any(|g| glob_match(g, ctx.path)) {
+        if let Some(re) = rule
+            .isel_category_pattern
+            .as_deref()
+            .and_then(|p| Regex::new(p, false).ok())
+        {
+            let mut seen: Vec<String> = Vec::new();
+            for (idx, raw_line) in ctx.scan.raw_lines.iter().enumerate() {
+                if let Some(m) = re.find(raw_line) {
+                    let category = match m.groups.get(1) {
+                        Some(Some((start, end))) => {
+                            let chars: Vec<char> = raw_line.chars().collect();
+                            if *end <= chars.len() {
+                                chars[*start..*end].iter().collect::<String>()
+                            } else {
+                                String::new()
+                            }
+                        }
+                        _ => String::new(),
+                    };
+                    if !category.is_empty() && !seen.contains(&category) {
+                        seen.push(category);
+                        if seen.len() == rule.max_isel_categories_per_file as usize + 1 {
+                            out.push(Finding::new(
+                                rule.severity,
+                                ctx.path,
+                                idx + 1,
+                                &rule.id,
+                                format!(
+                                    "file declares more than {} ISEL instruction-class category/categories (62.3.3)",
+                                    rule.max_isel_categories_per_file
+                                ),
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Lowercased file stem (basename without extension) of a slash-separated path.
+fn file_stem(path: &str) -> String {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let stem = match base.rfind('.') {
+        Some(idx) if idx > 0 => &base[..idx],
+        _ => base,
+    };
+    stem.to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1010,6 +749,117 @@ mod tests {
 
     fn findings_with_rule<'a>(findings: &'a [Finding], id: &str) -> Vec<&'a Finding> {
         findings.iter().filter(|f| f.rule == id).collect()
+    }
+
+    fn topology_config() -> Config {
+        Config::from_str(
+            r#"{
+            "standard": {"name": "CEP&CC", "version": "0.4", "source": "standard.md"},
+            "file_globs": ["**/*", "*"],
+            "rules": {"CEP-LINT-ATOMIC-FILE": {
+                "severity": 1,
+                "check": "file_topology_policy",
+                "class_line_limits": {"CEP-0": 10, "CEP-1": 20, "CEP-2": 40},
+                "banned_name_stems": ["util", "helper", "misc", "common"],
+                "passes_globs": ["**/passes/**"],
+                "pass_registration_pattern": "register_pass!",
+                "max_registrations_per_file": 1,
+                "isel_globs": ["**/targets/*/isel/**"],
+                "isel_category_pattern": "isel-category:\\s*([a-z0-9_]+)",
+                "max_isel_categories_per_file": 1,
+                "generated_pattern": "deterministically generated"
+            }}
+            }"#,
+        )
+        .expect("topology config")
+    }
+
+    fn run_topology(path: &str, src: &str) -> Vec<Finding> {
+        let config = topology_config();
+        let scanned = scan(src);
+        run_file_rules(&config, path, &scanned)
+    }
+
+    fn topology_hits(path: &str, src: &str) -> Vec<Finding> {
+        let findings = run_topology(path, src);
+        findings
+            .into_iter()
+            .filter(|f| f.rule == "CEP-LINT-ATOMIC-FILE")
+            .collect()
+    }
+
+    #[test]
+    fn atomic_file_line_limit_is_flagged_and_compliant_passes() {
+        let hot = "// CEP:CLASS: CEP-0\n";
+        let over = format!("{}{}", hot, "let x = 1;\n".repeat(10)); // 11 lines > 10
+        let hits = topology_hits("src/hot.rs", &over);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].message.contains("10-line limit"));
+        let under = format!("{}{}", hot, "let x = 1;\n".repeat(9)); // exactly 10
+        assert!(topology_hits("src/hot.rs", &under).is_empty());
+    }
+
+    #[test]
+    fn atomic_file_unlisted_class_has_no_mechanical_limit() {
+        // 62.5.1 names only the CEP-0/1/2 classes; other classes are not bounded here.
+        let over = format!("// CEP:CLASS: HPC-0\n{}", "let x = 1;\n".repeat(40));
+        assert!(topology_hits("src/hot.rs", &over).is_empty());
+        // A class with no configured limit and no header is likewise not flagged.
+        let bare = "let x = 1;\n".repeat(40);
+        assert!(topology_hits("src/hot.rs", &bare).is_empty());
+    }
+
+    #[test]
+    fn atomic_file_generated_marker_exempts_the_line_limit() {
+        let mut body = String::from("// deterministically generated by tools/gen_opcodes\n");
+        body.push_str("// CEP:CLASS: CEP-0\n");
+        body.push_str(&"let x = 1;\n".repeat(10));
+        assert!(topology_hits("src/gen.rs", &body).is_empty());
+        // The marker must sit in the opening lines; deep in the file it is not one.
+        let mut late = String::from("// CEP:CLASS: CEP-0\n");
+        late.push_str(&"let x = 1;\n".repeat(21));
+        late.push_str("// deterministically generated by tools/gen_opcodes\n");
+        assert_eq!(topology_hits("src/gen.rs", &late).len(), 1);
+    }
+
+    #[test]
+    fn atomic_file_junk_drawer_stem_is_flagged() {
+        let src = "let x = 1;\n";
+        let hits = topology_hits("src/string_utils.rs", src);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].message.contains("util"));
+        for path in ["src/helpers.rs", "src/misc_bits.rs", "src/common.rs"] {
+            assert_eq!(topology_hits(path, src).len(), 1, "path {}", path);
+        }
+        assert!(topology_hits("src/string_hash.rs", src).is_empty());
+        assert!(topology_hits("src/pea.rs", src).is_empty());
+    }
+
+    #[test]
+    fn atomic_file_pass_landfill_is_flagged_single_registration_passes() {
+        let two = "register_pass!(licm);\nregister_pass!(loop_fusion);\n";
+        let hits = topology_hits("src/passes/licm.rs", two);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].message.contains("62.3.1"));
+        let one = "register_pass!(licm);\n";
+        assert!(topology_hits("src/passes/licm.rs", one).is_empty());
+        // Outside the configured passes topology the cap does not apply.
+        assert!(topology_hits("src/driver.rs", two).is_empty());
+    }
+
+    #[test]
+    fn atomic_file_isel_multi_category_is_flagged_single_category_passes() {
+        let two = "// isel-category: arithmetic\nselect(n);\n// isel-category: simd\n";
+        let hits = topology_hits("src/targets/x86/isel/arithmetic.rs", two);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].message.contains("62.3.3"));
+        let one = "// isel-category: arithmetic\nselect(n);\n";
+        assert!(topology_hits("src/targets/x86/isel/arithmetic.rs", one).is_empty());
+        // A second mention of the SAME category is not a second category.
+        let repeat = "// isel-category: arithmetic\n// isel-category: arithmetic\n";
+        assert!(topology_hits("src/targets/x86/isel/arithmetic.rs", repeat).is_empty());
+        // Outside the configured isel topology the cap does not apply.
+        assert!(topology_hits("src/isel.rs", two).is_empty());
     }
 
     const COMPLIANT: &str = "\
@@ -1178,76 +1028,6 @@ pub fn later() {
     }
 
     #[test]
-    fn todo_marker_is_found_and_suppressed_form_passes() {
-        let src = "pub fn a() {\n    // TODO fix this\n    let b = 1;\n    b\n}\n";
-        let findings = run(src);
-        let hits = findings_with_rule(&findings, "CEP-LINT-TODO-OWNER");
-        assert_eq!(hits.len(), 1);
-        let ok = "pub fn a() {\n    // CEP:TODO(alice): CEP-314: fix later\n    let b = 1;\n    b\n}\n";
-        let findings_ok = run(ok);
-        assert!(findings_with_rule(&findings_ok, "CEP-LINT-TODO-OWNER").is_empty());
-    }
-
-    #[test]
-    fn placeholder_comment_exemptions() {
-        // Inline prose with a marker word, where the enclosing fn's CEP block declares
-        // the same word: sanctioned (declared terminology).
-        let src = "\
-// CEP:FILE: a.rs
-// CEP:WHAT: X
-// CEP:STATUS: complete
-
-/// CEP:WHAT: Prunes stub leaves from the tree.
-/// CEP:WHY: Termination.
-/// CEP:STATUS: complete
-/// CEP:FAILURE: none
-/// CEP:ASSUMES: none
-/// CEP:COST: O(n).
-/// CEP:EVIDENCE: test.
-pub fn prune() {
-    // now holds stub leaves only
-    let a = 1;
-    a
-}
-";
-        let findings = run(src);
-        assert!(findings_with_rule(&findings, "CEP-LINT-PLACEHOLDER-COMMENT").is_empty());
-        // A stray marker comment with no CEP context is a finding.
-        let bad = "pub fn a() {\n    // this is a placeholder for later\n    let b = 1;\n    b\n}\n";
-        let findings_bad = run(bad);
-        assert_eq!(
-            findings_with_rule(&findings_bad, "CEP-LINT-PLACEHOLDER-COMMENT").len(),
-            1
-        );
-    }
-
-    #[test]
-    fn placeholder_text_in_string_is_found_unless_loud_failure() {
-        let bad = "pub fn a() -> u32 {\n    let m = \"not implemented\";\n    1\n}\n";
-        let findings = run(bad);
-        assert_eq!(
-            findings_with_rule(&findings, "CEP-LINT-PLACEHOLDER-TEXT").len(),
-            1
-        );
-        let loud = "pub fn a() -> Result<u32, E> {\n    return Err(E::new(\"not implemented\"));\n}\n";
-        let findings_loud = run(loud);
-        assert!(findings_with_rule(&findings_loud, "CEP-LINT-PLACEHOLDER-TEXT").is_empty());
-    }
-
-    #[test]
-    fn magic_numbers_respect_contexts() {
-        // 9 in a plain statement is reported (severity 2); test regions are exempt.
-        let plain = "pub fn a(x: u32) -> u32 {\n    let y = x * 9;\n    y\n}\n";
-        let findings = run(plain);
-        let hits = findings_with_rule(&findings, "CEP-LINT-MAGIC-NUMBER");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].severity, 2);
-        let in_const = "pub const RATE: u32 = 9;\n";
-        let findings_const = run(in_const);
-        assert!(findings_with_rule(&findings_const, "CEP-LINT-MAGIC-NUMBER").is_empty());
-    }
-
-    #[test]
     fn empty_body_needs_stub_declaration() {
         let src = "pub fn a() {}\n";
         let findings = run(src);
@@ -1273,15 +1053,6 @@ pub fn a() {}
         // STATUS stub without OWNER/TICKET on the *file header* would fire; header here is
         // complete, and the fn block carries owner+ticket, so only budget-class findings remain.
         assert!(findings_with_rule(&findings_ok, "CEP-LINT-STUB-BODY").is_empty());
-    }
-
-    #[test]
-    fn naming_rules_use_captures() {
-        let src = "pub struct good_name { x: u32 }\n";
-        let findings = run(src);
-        let hits = findings_with_rule(&findings, "CEP-LINT-NAMING-TYPE");
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].message.contains("good_name"));
     }
 
     #[test]

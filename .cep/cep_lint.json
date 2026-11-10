@@ -1,7 +1,7 @@
 {
   "standard": {
     "name": "CEP&CC",
-    "version": "0.3",
+    "version": "0.4",
     "source": "standard.md"
   },
   "fail_on": [
@@ -210,6 +210,23 @@
       "check": "comment_regex",
       "pattern": "^\\s*//\\s*(let |fn |if |for |while |return |pub )",
       "suppression_pattern": "CEP:"
+    },
+    "CEP-LINT-ATOMIC-FILE": {
+      "severity": 1,
+      "check": "file_topology_policy",
+      "class_line_limits": {
+        "CEP-0": 400,
+        "CEP-1": 800,
+        "CEP-2": 1200
+      },
+      "banned_name_stems": ["util", "helper", "misc", "common"],
+      "passes_globs": ["**/passes/**"],
+      "pass_registration_pattern": "register_pass!|PassRegistration::new",
+      "max_registrations_per_file": 1,
+      "isel_globs": ["**/targets/*/isel/**"],
+      "isel_category_pattern": "isel-category:\\s*([a-z0-9_]+)",
+      "max_isel_categories_per_file": 1,
+      "generated_pattern": "deterministically generated"
     },
     "CEP-LINT-DOC-SYNC": {
       "severity": 1,

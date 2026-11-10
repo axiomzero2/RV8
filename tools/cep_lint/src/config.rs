@@ -72,6 +72,26 @@ pub struct Rule {
     /// Explicit activation switch for rules whose mechanical scoping is policy-dependent
     /// (the banned-token rule is advisory until the configuration sets this).
     pub enforce: bool,
+    /// Class-to-maximum-lines table for the atomic-file topology check (62.5.1); only
+    /// classes the standard bounds are listed, others carry no mechanical limit.
+    pub class_line_limits: Vec<(String, u64)>,
+    /// Banned junk-drawer file-name stems (62.4); a file whose stem contains one is a
+    /// violation.
+    pub banned_name_stems: Vec<String>,
+    /// Path globs selecting the passes topology for the one-pass-per-file cap (62.3.1).
+    pub passes_globs: Vec<String>,
+    /// Pattern matched against code lines to count pass registrations (62.5.3.3).
+    pub pass_registration_pattern: Option<String>,
+    pub max_registrations_per_file: u64,
+    /// Path globs selecting the ISEL topology for the category cap (62.3.3).
+    pub isel_globs: Vec<String>,
+    /// Pattern with one capture group naming the instruction-class category (62.5.3.4);
+    /// matched over whole lines because the spec's category tags live in comments.
+    pub isel_category_pattern: Option<String>,
+    pub max_isel_categories_per_file: u64,
+    /// Marker exempting a generated file from the line limits (62.5.1's exception);
+    /// matched within the file's opening lines.
+    pub generated_pattern: Option<String>,
 }
 
 impl Rule {
@@ -253,6 +273,34 @@ fn get_opt_string_vec(
     }
 }
 
+/// Reads a class-to-limit object (string keys, non-negative integer values) in source
+/// order, for the atomic-file line-limit table.
+fn get_class_line_limits(
+    value: &Value,
+    context: &str,
+    key: &str,
+) -> Result<Vec<(String, u64)>, ConfigError> {
+    match value.get(key) {
+        None => Ok(Vec::new()),
+        Some(v) => match v {
+            Value::Object(members) => {
+                let mut out = Vec::with_capacity(members.len());
+                for (name, item) in members {
+                    let max = match item.as_u64() {
+                        Some(n) => n,
+                        None => {
+                            return Err(type_error(context, key, item.kind(), "non-negative integer"))
+                        }
+                    };
+                    out.push((name.clone(), max));
+                }
+                Ok(out)
+            }
+            other => Err(type_error(context, key, other.kind(), "object")),
+        },
+    }
+}
+
 impl Config {
     /// CEP:WHAT: Parses configuration text (JSON) into a validated Config.
     /// CEP:WHY: The single entry point from raw bytes to enforced policy; also bound as the
@@ -375,6 +423,9 @@ impl Config {
             check("guard_pattern", rule.guard_pattern.as_deref(), false)?;
             check("heading_pattern", rule.heading_pattern.as_deref(), rule.icase)?;
             check("version_pattern", rule.version_pattern.as_deref(), false)?;
+            check("pass_registration_pattern", rule.pass_registration_pattern.as_deref(), false)?;
+            check("isel_category_pattern", rule.isel_category_pattern.as_deref(), false)?;
+            check("generated_pattern", rule.generated_pattern.as_deref(), false)?;
         }
         Ok(())
     }
@@ -463,6 +514,17 @@ impl Config {
             version_pattern: get_string(body, &context, "version_pattern")?,
             allowed_fields: get_opt_string_vec(body, &context, "allowed_fields")?,
             enforce: get_bool(body, &context, "enforce")?.unwrap_or(false),
+            class_line_limits: get_class_line_limits(body, &context, "class_line_limits")?,
+            banned_name_stems: get_string_vec(body, &context, "banned_name_stems")?,
+            passes_globs: get_string_vec(body, &context, "passes_globs")?,
+            pass_registration_pattern: get_string(body, &context, "pass_registration_pattern")?,
+            max_registrations_per_file: get_u64(body, &context, "max_registrations_per_file")?
+                .unwrap_or(1),
+            isel_globs: get_string_vec(body, &context, "isel_globs")?,
+            isel_category_pattern: get_string(body, &context, "isel_category_pattern")?,
+            max_isel_categories_per_file: get_u64(body, &context, "max_isel_categories_per_file")?
+                .unwrap_or(1),
+            generated_pattern: get_string(body, &context, "generated_pattern")?,
         })
     }
 
@@ -605,7 +667,7 @@ pub(crate) mod tests {
     fn parses_shipped_config() {
         let config = Config::from_str(SHIPPED_TEXT).expect("shipped config parses");
         assert_eq!(config.standard_name, "CEP&CC");
-        assert_eq!(config.standard_version, "0.3");
+        assert_eq!(config.standard_version, "0.4");
         assert_eq!(config.fail_on, vec![0, 1]);
         assert_eq!(config.exit_codes.clean, 0);
         assert_eq!(config.exit_codes.findings, 1);
@@ -613,7 +675,7 @@ pub(crate) mod tests {
         assert_eq!(config.exit_codes.usage, 3);
         assert_eq!(config.file_globs.len(), 3);
         assert!(config.file_globs.contains(&"crates/**/*.rs".to_string()));
-        assert_eq!(config.rules.len(), 18);
+        assert_eq!(config.rules.len(), 19);
         let header = config
             .rule_by_check("comment_block_schema", Some("file_header"))
             .expect("file header rule");
@@ -636,6 +698,20 @@ pub(crate) mod tests {
             .rule_by_check("doc_rule_coverage", None)
             .expect("doc sync rule");
         assert_eq!(doc.doc_path.as_deref(), Some("standard.md"));
+        let atomic = config
+            .rule_by_check("file_topology_policy", None)
+            .expect("atomic-file rule");
+        assert_eq!(atomic.id, "CEP-LINT-ATOMIC-FILE");
+        assert_eq!(atomic.severity, 1);
+        assert_eq!(atomic.class_line_limits.len(), 3);
+        assert!(atomic.class_line_limits.contains(&("CEP-0".to_string(), 400)));
+        assert!(atomic.class_line_limits.contains(&("CEP-1".to_string(), 800)));
+        assert!(atomic.class_line_limits.contains(&("CEP-2".to_string(), 1200)));
+        assert_eq!(atomic.banned_name_stems.len(), 4);
+        assert!(atomic.passes_globs.contains(&"**/passes/**".to_string()));
+        assert_eq!(atomic.max_registrations_per_file, 1);
+        assert_eq!(atomic.max_isel_categories_per_file, 1);
+        assert!(atomic.generated_pattern.is_some());
     }
 
     #[test]

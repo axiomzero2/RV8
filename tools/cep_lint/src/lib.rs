@@ -18,6 +18,7 @@
 // CEP:SECURITY: zero external dependencies; regex and JSON inputs are step/depth budgeted
 //   so hostile content cannot drive recursion or unbounded work (38.12, 38.13).
 
+pub mod checks_text;
 pub mod config;
 pub mod engine;
 pub mod json;
