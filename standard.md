@@ -14324,3 +14324,290 @@ A repository topology is compliant only if:
 - [ ] Merge conflicts are localized to the single atomic component being changed.
 
 ---
+
+# 63. The Craft of Optimal Performance Code (The Silicon Mandate)
+This chapter defines the mechanical, mathematical, and hardware-level disciplines required to write OPT-0 (target-optimal) code. Writing optimal code is not about writing "clean" C++26 and hoping the compiler figures it out. It is about manually orchestrating the CPU's execution ports, cache hierarchy, and branch predictor. 
+
+Where this chapter is stricter than Chapter 23 (Optimal Code), this chapter wins.
+
+## 63.1 The Prime Directive: You Are Writing for the Microarchitecture
+The ISA manual tells you what instructions exist. It does not tell you how the silicon executes them. The compiler's cost model is a heuristic. The only truth is the silicon's execution ports, the cache hierarchy, and the branch predictor.
+
+> **You do not write code for the C++ abstract machine. You write code for the execution ports, the uop cache, and the L1 data cache.**
+> **If you cannot explain the generated assembly in terms of uops, latency, and throughput, your code is not optimal. It is a guess.**
+
+### 63.1.1 The Measurement Mandate
+If you did not measure it with Performance Monitoring Counters (PMCs), you did not optimize it. 
+- **Banned:** Claiming a loop is "fast" based on instruction count alone.
+- **Required:** Every OPT-0 claim must be backed by hardware counters (e.g., `perf stat`, `uops.info`, IACA, `nsight compute`).
+- **Extermination:** Adding a "performance optimization" without a microbenchmark proving a reduction in actual cycles, cache misses, or uops on the target microarchitecture is **exterminated**.
+
+## 63.2 Memory Hierarchy Mastery
+Memory is not a flat array. It is a strict, unforgiving hierarchy of caches, TLBs, and main memory. Every pointer access must be classified and proven.
+
+### 63.2.1 Cache-Line Alignment and Padding
+The cache line (typically 64 bytes) is the fundamental unit of memory transfer. 
+- **Banned:** Placing frequently accessed, independent mutable variables on the same cache line (False Sharing).
+- **Required:** Use `alignas(cep::target::cache_line_bytes)` for thread-local counters, spinlocks, and producer-consumer ring buffers.
+- **Extermination:** Profiling a multi-threaded hot path and finding cache-line bouncing (measured via `perf c2c`) without explicit padding is a **Severity 0 defect**.
+
+### 63.2.2 Spatial and Temporal Locality
+The CPU prefetcher relies on predictable access patterns. 
+- **Banned:** Pointer-chasing data structures (e.g., linked lists, trees of `std::unique_ptr`) in CEP-0 hot paths.
+- **Required:** Use contiguous arrays, flat structs, and Structure-of-Arrays (SoA) layouts when vectorization or sequential access is required.
+- **Extermination:** Traversing a linked list in an inner loop is **exterminated**. Use a flat arena-allocated array with integer indices.
+
+### 63.2.3 The Prefetcher Contract
+If the access pattern is non-sequential (e.g., graph traversal, indirect lookups), the hardware prefetcher will fail.
+- **Required:** Use explicit software prefetching (`__builtin_prefetch`, `_mm_prefetch`) if the latency of the cache miss is on the critical path and the next address can be predicted.
+- **Banned:** Prefetching without proving that the prefetch distance matches the memory latency pipeline depth.
+
+## 63.3 Branchless Execution and Predictability
+A branch misprediction flushes the pipeline, costing 15–20 cycles on modern superscalar CPUs. Branches are a performance tax.
+
+### 63.3.1 The Branch Penalty Reality
+- **Banned in CEP-0:** Data-dependent branching inside inner loops unless the branch is 100% predictable (proven by profile) or mathematically bounded.
+- **Required:** Replace conditional assignments with arithmetic, bitwise operations, or conditional moves (`cmov`).
+
+### 63.3.2 Arithmetic and Logic Substitution
+Instead of branching to select a value, use math.
+**Bad:**
+```cpp
+if (x > limit) x = limit;
+```
+**Good (Branchless Clamp):**
+```cpp
+// CEP:ASSUMES: No signed overflow.
+x = x - ((x - limit) & ((x - limit) >> (sizeof(int) * 8 - 1)));
+```
+Or use compiler intrinsics (`std::min`, `std::max`) *only* if the generated assembly is verified to be branchless on the target.
+
+### 63.3.3 Table-Driven Dispatch
+Switch statements over dense enums often compile to branch trees. 
+- **Required:** For hot dispatch, use jump tables or, preferably, arrays of function pointers or direct data lookups.
+- **Extermination:** A 50-case `switch` statement inside a CEP-0 inner loop that generates a branch tree instead of a jump table or computed goto is **exterminated**.
+
+## 63.4 Dependency Chains and ILP (Instruction-Level Parallelism)
+Modern CPUs can execute dozens of instructions per cycle, but only if they are independent. Latency is the enemy of throughput.
+
+### 63.4.1 Breaking False Dependencies
+Do not reuse a register for unrelated values if it creates a false dependency chain.
+- **Extermination:** Generating an instruction that writes to a register that is still being read by a subsequent independent instruction, creating a false dependency chain, is **exterminated** unless register pressure demands it. Use XOR to zero a register (`xorps xmm0, xmm0`) instead of moving zero.
+
+### 63.4.2 Latency Hiding via Unrolling and Interleaving
+If a loop is bound by the latency of a single dependency chain (e.g., `sum += data[i]`), the CPU will stall waiting for the addition to complete.
+- **Required:** Use multiple accumulators to break the dependency chain.
+**Bad:**
+```cpp
+uint64_t sum = 0;
+for (auto v : data) sum += v; // Bound by ADD latency (e.g., 4 cycles).
+```
+**Good:**
+```cpp
+// CEP:CODEGEN-ILP: 4-way unrolled to hide ADD latency.
+uint64_t sum0 = 0, sum1 = 0, sum2 = 0, sum3 = 0;
+for (size_t i = 0; i < n; i += 4) {
+    sum0 += data[i];
+    sum1 += data[i+1];
+    sum2 += data[i+2];
+    sum3 += data[i+3];
+}
+uint64_t sum = (sum0 + sum1) + (sum2 + sum3);
+```
+
+## 63.5 The Ban on Implicit Work
+The compiler will silently insert work if you allow it. You must audit the assembly for hidden costs.
+
+### 63.5.1 No Implicit Conversions
+- **Banned:** Mixing signed and unsigned integers, or different widths (e.g., `uint32_t` to `uint64_t`), inside hot loops.
+- **Why:** The compiler will insert `movzx` or `cdqe` instructions, wasting execution ports.
+- **Required:** Explicit, matching types for all loop counters and arithmetic.
+
+### 63.5.2 No Hidden Temporaries
+- **Banned:** Returning large structs by value if the compiler fails to elide the copy or if the ABI forces a memory copy via a hidden pointer.
+- **Required:** Pass output parameters by reference, or ensure the return type is trivially copyable and fits in registers (e.g., `std::pair<uint64_t, uint64_t>`).
+
+## 63.6 Extermination Examples (The Silicon Mandate)
+
+### Example 1: The "Fast" Linked List
+**Violation:**
+```cpp
+for (auto* node = head; node; node = node->next) {
+    process(node->data);
+}
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Pointer-chasing guarantees an L1 cache miss for every node. The prefetcher cannot predict the next address.
+Rule: CEP&CC 63.2.2
+Action: Refactor to a contiguous arena-allocated array.
+```
+
+### Example 2: Branching on Data
+**Violation:**
+```cpp
+for (auto v : input) {
+    if (v > threshold) output[i++] = v;
+}
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Data-dependent branch inside a hot loop. Branch predictor will fail on random input, flushing the pipeline.
+Rule: CEP&CC 63.3.1
+Action: Use branchless compaction (e.g., SIMD mask and compress, or branchless prefix-sum indexing).
+```
+
+### Example 3: Single Accumulator Bottleneck
+**Violation:**
+```cpp
+float dot = 0.0f;
+for (int i=0; i<N; ++i) dot += a[i] * b[i]; // FMA latency bound.
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Loop is bound by FMA latency (e.g., 4 cycles). CPU execution ports are starved.
+Rule: CEP&CC 63.4.2
+Action: Unroll with 4 independent accumulators to saturate FMA throughput.
+```
+
+---
+
+# 64. Fast Path Engineering (The Zero-Latency Protocol)
+This chapter defines how to architect, isolate, and protect fast paths. A fast path is not just a function; it is a quarantined execution environment where cold-path pollution is a Severity 0 defect. 
+
+## 64.1 The Prime Directive: The Fast Path is a Quarantine Zone
+> **The fast path does not know what an error is. The fast path does not know what a string is. The fast path does not allocate, it does not lock, and it does not branch on the unexpected.**
+> **If cold-path logic bleeds into the fast path, the system is defective.**
+
+### 64.1.1 The Separation Mandate
+Fast paths (CEP-0) must be physically and logically separated from cold paths (CEP-1/CEP-2).
+- **Banned:** Mixing error formatting, logging, or configuration parsing in the same translation unit or function as the hot loop.
+- **Required:** The fast path must be a pure, deterministic transformation of validated input to output.
+
+## 64.2 The Validation Airlock
+You cannot run untrusted input through a CEP-0 fast path. The fast path assumes invariants; the cold path must prove them.
+
+### 64.2.1 The Validation Boundary
+Before entering the fast path, all invariants must be checked.
+- **Required:** A dedicated "Validation Airlock" function that checks bounds, alignment, encodings, and state.
+- **Banned:** Checking bounds *inside* the inner loop of the fast path "just to be safe."
+- **Extermination:** A fast path that performs bounds checking on untrusted input in the hot loop is **exterminated**. Validate once at the airlock, then use `[[assume]]` or `CEP_ASSERT` in the fast path.
+
+### 64.2.2 The State Handoff
+The airlock must translate untrusted, messy external state into a pristine, validated, strongly-typed internal state.
+```cpp
+// CEP:WHAT: Validation airlock for network packets.
+// CEP:WHY: Proves invariants before entering the CEP-0 decoder.
+// CEP:STATUS: complete
+// CEP:FAILURE: Returns PacketError on malformed bounds.
+auto validate_packet(std::span<const uint8_t> raw) -> std::expected<ValidatedPacket, PacketError>;
+
+// CEP:WHAT: CEP-0 hot decoder.
+// CEP:ASSUMES: ValidatedPacket invariants are proven by the airlock.
+// CEP:COST: 1 cycle/byte.
+void decode_fast_path(const ValidatedPacket& pkt, DecoderState& state);
+```
+
+## 64.3 The Cold-Path Evacuation Protocol
+When the fast path encounters an anomaly (e.g., a rare edge case, a cache miss that requires a syscall, a complex error), it must evacuate to the cold path immediately.
+
+### 64.3.1 Status Codes over Exceptions
+- **Banned:** Exceptions in CEP-0.
+- **Required:** Use `std::expected`, status codes, or explicit error enums. The error path must be a simple conditional branch that jumps to a cold, `[[cold]]` annotated function.
+- **Extermination:** Throwing an exception, or using a library function that might throw, inside a CEP-0 fast path is **exterminated**.
+
+### 64.3.2 The `[[cold]]` Annotation
+Rare error handlers, fallback logic, and complex edge-case processing must be marked `[[cold]]` or placed in separate translation units.
+- **Why:** This instructs the compiler to optimize the fast path for size and locality, pushing the error handling code to the end of the binary, preventing I-cache pollution.
+
+## 64.4 State Machines and Bounded Iteration
+Fast paths often implement state machines (e.g., parsers, protocol handlers). These must be ruthlessly bounded.
+
+### 64.4.1 Explicit State Transitions
+- **Banned:** Hidden state, implicit conversions, or virtual dispatch in state machines.
+- **Required:** Explicit `enum class` states, `switch` statements (or jump tables), and explicit context structs.
+- **Extermination:** Using `std::function` or virtual functions to dispatch state transitions in a CEP-0 parser is **exterminated**.
+
+### 64.4.2 Bounded Iteration
+- **Banned:** `while(true)` loops without an explicit, proven termination condition.
+- **Required:** All loops must have a maximum iteration count derived from the validated input size.
+
+## 64.5 The "Last Resort" Protocol: Intrinsics and Inline Assembly
+The compiler is a translator, but it is not omniscient. Sometimes, you must speak directly to the silicon.
+
+### 64.5.1 When the Compiler Fails
+Inline assembly and target intrinsics are allowed **only** when:
+1. The compiler fails to generate the optimal instruction sequence (proven by assembly inspection).
+2. A specific hardware feature (e.g., CRC32c, AES-NI, memory barriers) is required.
+3. The operation is on the absolute critical path.
+
+### 64.5.2 The Isolation Mandate
+- **Banned:** Scattering `#ifdef __AVX2__` or inline assembly throughout the generic codebase.
+- **Required:** All intrinsics and assembly must be isolated in `target/` directories, wrapped in safe, strongly-typed C++26 functions, and gated by feature-test macros.
+- **Extermination:** Writing inline assembly in a generic header file is **exterminated**.
+
+## 64.6 Fast Path Review Checklist
+A fast path is compliant only if:
+- [ ] The Validation Airlock exists and proves all invariants.
+- [ ] No bounds checks, locks, or allocations exist in the inner loop.
+- [ ] Memory accesses are contiguous, aligned, and prefetch-friendly.
+- [ ] Branches are eliminated or proven highly predictable.
+- [ ] Dependency chains are broken to maximize ILP.
+- [ ] Error handling evacuates to a `[[cold]]` cold path.
+- [ ] Assembly/intrinsics are isolated in target-specific modules.
+- [ ] PMCs prove the cycle cost matches the `CEP:COST` claim.
+
+## 64.7 Extermination Examples (The Zero-Latency Protocol)
+
+### Example 1: The "Safe" Inner Loop
+**Violation:**
+```cpp
+for (size_t i = 0; i < len; ++i) {
+    if (i >= buffer_capacity) throw std::out_of_range("Oops"); // Or even a branch to an error handler
+    buffer[i] = data[i];
+}
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Bounds check and branch inside the CEP-0 hot loop. The airlock failed to prove `len <= buffer_capacity`.
+Rule: CEP&CC 64.2.1
+Action: Validate `len` at the airlock. Use `[[assume(i < buffer_capacity)]]` or debug-asserts in the fast path.
+```
+
+### Example 2: Virtual Dispatch in a Parser
+**Violation:**
+```cpp
+class TokenHandler { virtual void handle(Token t) = 0; };
+// ... inside hot loop ...
+handler->handle(token);
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Virtual dispatch introduces an indirect branch, destroying the branch predictor and preventing inlining.
+Rule: CEP&CC 64.4.1
+Action: Use a `switch` statement on an `enum class TokenType`, or a template-based static dispatch.
+```
+
+### Example 3: Inline Assembly in a Header
+**Violation:**
+```cpp
+// include/math_utils.h
+inline uint32_t crc32(uint32_t crc, uint32_t data) {
+    __asm__ ("crc32 %0, %1, %2" : "=r"(crc) : "r"(crc), "r"(data));
+    return crc;
+}
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Inline assembly in a generic header violates target isolation. Will fail to compile on ARM or cause silent miscompilation if flags change.
+Rule: CEP&CC 64.5.2
+Action: Move to `target/x86_64/crc32.cppm`, gate with `#if defined(__SSE4_2__)`, and provide a fallback.
+```
+
+---
