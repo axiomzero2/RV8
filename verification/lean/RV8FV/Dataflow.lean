@@ -247,4 +247,77 @@ def pathComputes (p : Prog) (l : List BlockId) (e : EFact) : Prop :=
 def AnticipatableAt (p : Prog) (e : EFact) (b : BlockId) : Prop :=
   ∀ l, PathTo p 0 l → l.getLast? = some b → pathComputes p l e
 
+/-! ### The discharge laws of #61: anticipation propagates along edges. -/
+
+/-- The last element of a nonempty list is a member of the list. -/
+theorem getLast?_mem_self : ∀ (l : List BlockId) (b : BlockId),
+    l.getLast? = some b → b ∈ l := by
+  intro l
+  induction l with
+  | nil => intro b h; simp at h
+  | cons a rest ih =>
+      intro b h
+      cases rest with
+      | nil =>
+          have hab : a = b := by simpa using h
+          subst hab
+          exact List.Mem.head _
+      | cons c rest' =>
+          have h' : (c :: rest').getLast? = some b := by simpa using h
+          exact List.Mem.tail _ (ih b h')
+
+/-- Seeding: a path through a block that computes `e` computes `e`. -/
+theorem pathComputes_of_mem (p : Prog) (e : EFact) (l : List BlockId) (c : BlockId)
+    (hc : c ∈ l) (hbc : blockComputes p c e = true) : pathComputes p l e :=
+  ⟨c, hc, hbc⟩
+
+/-- Prefix preservation: whatever a path computes, every extension of it
+    computes as well. -/
+theorem pathComputes_append (p : Prog) (e : EFact) (l r : List BlockId)
+    (h : pathComputes p l e) : pathComputes p (l ++ r) e := by
+  obtain ⟨c, hc, hbc⟩ := h
+  exact ⟨c, List.mem_append.mpr (Or.inl hc), hbc⟩
+
+/-- Path extension: appending one edge to a path that ends at `b` gives a
+    valid path that ends at the successor `y`. -/
+theorem pathTo_append_edge (p : Prog) : ∀ (x : BlockId) (l : List BlockId)
+    (b y : BlockId), PathTo p x l → l.getLast? = some b → y ∈ succs p b →
+    PathTo p x (l ++ [y]) := by
+  intro x l
+  induction l generalizing x with
+  | nil => intro b y _ hlast _; simp at hlast
+  | cons a rest ih =>
+      intro b y hpath hlast hy
+      cases rest with
+      | nil =>
+          have hab : a = b := by simpa using hlast
+          subst hab
+          have hp : a ∈ succs p x := by simpa [PathTo] using hpath
+          exact ⟨hp, hy, True.intro⟩
+      | cons c rest' =>
+          have hpath' : a ∈ succs p x ∧ PathTo p a (c :: rest') := by
+            simpa [PathTo] using hpath
+          have hrest : (c :: rest').getLast? = some b := by simpa using hlast
+          exact ⟨hpath'.1, ih a b y hpath'.2 hrest hy⟩
+
+/-- **The #61 discharge (transfer)**: if `e` is anticipatable at `b` — the
+    exact path-based property — then every path reaching the successor `y`
+    through a path to `b` still computes `e`.  This is the local transfer
+    step that the PRE worklist iterates. -/
+theorem anticipatable_transfer (p : Prog) (e : EFact) (b y : BlockId)
+    (hAB : AnticipatableAt p e b) (_hy : y ∈ succs p b)
+    (l : List BlockId) (hl : PathTo p 0 l) (hlast : l.getLast? = some b) :
+    pathComputes p (l ++ [y]) e :=
+  pathComputes_append p e l [y] (hAB l hl hlast)
+
+/-- **The #61 discharge (seeding)**: if the block `b` itself computes `e`,
+    then every path reaching `y` through a path to `b` computes `e`, even
+    when no earlier block on the path did. -/
+theorem anticipatable_seed (p : Prog) (e : EFact) (l : List BlockId) (b y : BlockId)
+    (hlast : l.getLast? = some b) (hbc : blockComputes p b e = true) :
+    pathComputes p (l ++ [y]) e := by
+  refine pathComputes_of_mem p e (l ++ [y]) b ?_ hbc
+  have hmem : b ∈ l := getLast?_mem_self l b hlast
+  exact List.mem_append.mpr (Or.inl hmem)
+
 end RV8FV

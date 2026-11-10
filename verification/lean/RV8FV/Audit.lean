@@ -84,6 +84,8 @@ def Audit.targets : List Name :=
    `RV8FV.wxor_invol, `RV8FV.wmul_pow2_eq_wshl,
    -- the CFG theory
    `RV8FV.Reach_trans, `RV8FV.reach_path, `RV8FV.setTermBlocks_length,
+   `RV8FV.pathTo_append_edge, `RV8FV.anticipatable_transfer,
+   `RV8FV.anticipatable_seed, `RV8FV.pathComputes_append,
    -- the pass contracts
    `RV8FV.sound_comp, `RV8FV.soundOn_comp, `RV8FV.keepSSA_comp,
    `RV8FV.noGrow_comp,
