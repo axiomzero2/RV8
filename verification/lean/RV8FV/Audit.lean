@@ -78,6 +78,7 @@ def Audit.targets : List Name :=
    `RV8FV.stepInstr_eq_except, `RV8FV.nopifiable_of_removable,
    -- the generic optimizer sweep
    `RV8FV.optBlock_length, `RV8FV.foldFixpoint_equiv, `RV8FV.fold_local_optimal,
+   `RV8FV.optTerm_step_agree, `RV8FV.process_step_agree,
    -- the word algebra (the rewrite laws the value passes use)
    `RV8FV.wadd_comm, `RV8FV.wmul_comm, `RV8FV.wmul_wadd_distr,
    `RV8FV.wxor_invol, `RV8FV.wmul_pow2_eq_wshl,
@@ -98,6 +99,9 @@ def Audit.targets : List Name :=
    `RV8FV.sccpSweep_stable, `RV8FV.intervalJoin_comm, `RV8FV.rangeSweep_stable,
    `RV8FV.andersenSweep_stable, `RV8FV.steensgaard_stable,
    `RV8FV.memVerSweep_stable, `RV8FV.taintSweep_stable, `RV8FV.p63_length,
+   `RV8FV.binop_eval_some_of_ne_udiv, `RV8FV.divSafe_notStuck,
+   `RV8FV.divSafe_discharge, `RV8FV.overflowFree_add, `RV8FV.overflowFree_sub,
+   `RV8FV.overflowFree_mul, `RV8FV.p68_step_agree, `RV8FV.p69_step_agree,
    -- Passes #71-95
    `RV8FV.p72_length, `RV8FV.alignTo_aligned, `RV8FV.wadd_wsub_cancel,
    `RV8FV.deltaLoop_roundtrip, `RV8FV.delta_roundtrip,
