@@ -187,6 +187,173 @@ def Reducible (p : Prog) : Prop :=
 def ControlDependent (p : Prog) (x y : BlockId) : Prop :=
   ∃ y', y' ∈ succs p y ∧ PostDominates p y' x ∧ ¬ PostDominates p y x
 
+/-! ## The discharge laws of #26-#30.
+
+    The five analysis passes #26-#30 are the predicates above; these are the
+    machine-checked laws their clients consume. -/
+
+/-- Membership split: a member of a list cuts it into a prefix before it and
+    a suffix after it. -/
+theorem list_mem_split : ∀ (l : List BlockId) (b : BlockId), b ∈ l →
+    ∃ pre rest : List BlockId, l = pre ++ b :: rest := by
+  intro l
+  induction l with
+  | nil => intro b h; cases h
+  | cons a rest ih =>
+      intro b h
+      rcases List.mem_cons.mp h with rfl | hb
+      · exact ⟨[], rest, rfl⟩
+      · obtain ⟨pre, rest', rfl⟩ := ih b hb
+        exact ⟨a :: pre, rest', rfl⟩
+
+/-- Prefix truncation: following a path and stopping at any block on it is
+    again a path. -/
+theorem pathTo_prefix (p : Prog) : ∀ (x : BlockId) (pre : List BlockId)
+    (y : BlockId) (rest : List BlockId),
+    PathTo p x (pre ++ y :: rest) → PathTo p x (pre ++ [y]) := by
+  intro x pre
+  induction pre generalizing x with
+  | nil =>
+      intro y rest h
+      obtain ⟨hy, _⟩ := h
+      exact ⟨hy, True.intro⟩
+  | cons a prel ih =>
+      intro y rest h
+      obtain ⟨ha, hrest⟩ := h
+      exact ⟨ha, ih a y rest hrest⟩
+
+/-- Suffix jump: from any block on a path, the remainder of the path is a
+    path from that block. -/
+theorem pathTo_suffix (p : Prog) : ∀ (x : BlockId) (pre : List BlockId)
+    (y : BlockId) (rest : List BlockId),
+    PathTo p x (pre ++ y :: rest) → PathTo p y rest := by
+  intro x pre
+  induction pre generalizing x with
+  | nil => intro _ _ h; exact h.2
+  | cons _ prel ih =>
+      intro y rest h
+      exact ih _ y rest h.2
+
+/-- A nonempty path is a reachability witness. -/
+theorem pathTo_last_reach (p : Prog) : ∀ (x : BlockId) (l : List BlockId)
+    (e : BlockId), PathTo p x l → l.getLast? = some e → Reach p x e := by
+  intro x l
+  induction l generalizing x with
+  | nil => intro e hpath hlast; simp at hlast
+  | cons u rest ih =>
+      intro e hpath hlast
+      cases rest with
+      | nil =>
+          have hue : u = e := by simpa using hlast
+          obtain ⟨hu, _⟩ := hpath
+          subst hue
+          exact reach_edge p x _ hu
+      | cons v tl =>
+          have hlast' : (v :: tl).getLast? = some e := by simpa using hlast
+          exact Reach_trans p x u e (reach_edge p x u hpath.1)
+            (ih u e hpath.2 hlast')
+
+/-- Dominance is transitive: a dominator of a dominator of `c` dominates
+    `c` (the order of the dominator tree). -/
+theorem dominates_trans (p : Prog) (d b c : BlockId)
+    (hdb : Dominates p d b) (hbc : Dominates p b c) : Dominates p d c := by
+  intro l hl hlast
+  obtain ⟨pre, rest, rfl⟩ := list_mem_split l b (hbc l hl hlast)
+  have hpref : PathTo p 0 (pre ++ [b]) := pathTo_prefix p 0 pre b rest hl
+  rcases List.mem_append.mp (hdb _ hpref (by simp [List.getLast?_append])) with h | h
+  · exact List.mem_append.mpr (Or.inl h)
+  · rcases List.mem_singleton.mp h with rfl
+    exact List.mem_append.mpr (Or.inr List.mem_cons_self)
+
+/-- A dominator of a block reachable by a real path is itself reachable, and
+    reaches the block it dominates: dominance never leaves the reachable
+    fragment. -/
+theorem dominates_reach (p : Prog) (d h : BlockId) (hd : Dominates p d h)
+    (l : List BlockId) (hl : PathTo p 0 l) (hlast : l.getLast? = some h) :
+    Reach p 0 d ∧ Reach p d h := by
+  obtain ⟨pre, post, rfl⟩ := list_mem_split l d (hd l hl hlast)
+  have hpref : PathTo p 0 (pre ++ [d]) := pathTo_prefix p 0 pre d post hl
+  have hpreflast : (pre ++ [d]).getLast? = some d := by simp [List.getLast?_append]
+  refine ⟨pathTo_last_reach p 0 (pre ++ [d]) d hpref hpreflast, ?_⟩
+  cases post with
+  | nil =>
+      rw [hpreflast] at hlast
+      have hde : d = h := by simpa using hlast
+      subst hde
+      exact .refl _
+  | cons v tl =>
+      have hsuf : PathTo p d (v :: tl) := pathTo_suffix p 0 pre d (v :: tl) hl
+      have hlast' : (v :: tl).getLast? = some h := by
+        simpa [List.getLast?_append] using hlast
+      exact pathTo_last_reach p d (v :: tl) h hsuf hlast'
+
+/-- Post-dominance is transitive, provided the intermediate block is not
+    itself an exit (from an exit no path leaves, so post-dominance is
+    vacuous there — the one place the complete-path encoding bites). -/
+theorem postDominates_trans (p : Prog) (z y x : BlockId)
+    (hzy : PostDominates p z y) (hyx : PostDominates p y x)
+    (hny : ¬ isExit p y) : PostDominates p z x := by
+  intro l e hl hlast hexit
+  have hyne : y ≠ e := by
+    intro h
+    subst h
+    exact hny hexit
+  obtain ⟨pre, rest, rfl⟩ := list_mem_split l y (hyx l e hl hlast hexit)
+  have hlastpre : (pre ++ [y]).getLast? = some y := by simp [List.getLast?_append]
+  have hrne : rest ≠ [] := by
+    intro h0
+    rw [h0] at hl hlast
+    rw [hlastpre] at hlast
+    exact hyne (by simpa using hlast)
+  have hrEmpty : rest.isEmpty = false := by
+    cases rest with
+    | nil => exact absurd rfl hrne
+    | cons _ _ => rfl
+  have hsuf : PathTo p y rest := pathTo_suffix p x pre y rest hl
+  have hrestlast : rest.getLast? = some e := by
+    cases rest with
+    | nil => exact absurd rfl hrne
+    | cons v tl => simpa using hlast
+  exact List.mem_append.mpr (Or.inr (List.mem_cons_of_mem _
+    (hzy rest e hsuf hrestlast hexit)))
+
+/-- The natural loop of a back edge is cycle-closed: every member of the
+    body can reach the header (through the latch), so the body really is a
+    set of loops, not loose blocks. -/
+theorem loopBody_reaches_header (p : Prog) (h l m : BlockId)
+    (hbe : BackEdge p h l) (l0 : List BlockId) (hl0 : PathTo p 0 l0)
+    (hl0last : l0.getLast? = some h) (hm : InLoopBody p h l m) :
+    Reach p m h := by
+  have hlh : Reach p l h := (dominates_reach p l h hbe.2 l0 hl0 hl0last).2
+  rcases hm with rfl | ⟨⟨_, hlm1, hlm2, _⟩, _⟩
+  · exact .refl _
+  · exact Reach_trans p m l h (pathTo_last_reach p m _ l hlm1 hlm2) hlh
+
+/-- The reducibility law as the consumer contract: every edge that closes a
+    cycle reachable from the entry is a back edge, so natural-loop detection
+    finds every loop of a reducible control-flow graph. -/
+theorem reducible_backEdge (p : Prog) (hr : Reducible p) (h l : BlockId)
+    (h0 : Reach p 0 h) (hs : l ∈ succs p h) (hcy : Reach p l h) :
+    BackEdge p h l :=
+  ⟨hs, hr h l h0 hs hcy⟩
+
+/-- The control-dependence edge is witnessed by real reachability: if `x` is
+    control-dependent on `y`, some successor of `y` is reachable from `x`.
+    The witness path is supplied by the definition's own negated clause. -/
+theorem controlDependent_reaches (p : Prog) (x y : BlockId)
+    (hcd : ControlDependent p x y) :
+    ∃ y', y' ∈ succs p y ∧ Reach p x y' := by
+  obtain ⟨y', hy'1, hy'2, hy'3⟩ := hcd
+  obtain ⟨l, e, hl, hlast, hexit, hny⟩ : ∃ l e, PathTo p x l ∧
+      l.getLast? = some e ∧ isExit p e = true ∧ y ∉ l :=
+    Classical.byContradiction (fun hcon =>
+      hy'3 (fun l e hl hlast hexit =>
+        Classical.byContradiction (fun hmem => hcon ⟨l, e, hl, hlast, hexit, hmem⟩)))
+  obtain ⟨pre, post, rfl⟩ := list_mem_split l y' (hy'2 l e hl hlast hexit)
+  have hpref : PathTo p x (pre ++ [y']) := pathTo_prefix p x pre y' post hl
+  exact ⟨y', hy'1, pathTo_last_reach p x (pre ++ [y']) y' hpref
+    (by simp [List.getLast?_append])⟩
+
 /-! ## Terminator replacement with pointwise lemmas. -/
 
 /-- Replace the terminator of block `b` in a block list. -/

@@ -122,11 +122,11 @@ def frames : List PassFrame :=
   ⟨23, "Irreducible CFG Reduction", 1, .structural, .fv1, "the transformation/system contract defined in RV8FV/Passes1.lean", "FV-1: definition complete; run-level equivalence tracked (CEP&CC 54.2.2, 54.3.1)"⟩,
   ⟨24, "Edge Splitting", 1, .structural, .fv1, "the transformation/system contract defined in RV8FV/Passes1.lean", "FV-1: definition complete; run-level equivalence tracked (CEP&CC 54.2.2, 54.3.1)"⟩,
   ⟨25, "Critical Edge Splitting", 1, .structural, .fv1, "the transformation/system contract defined in RV8FV/Passes1.lean", "FV-1: definition complete; run-level equivalence tracked (CEP&CC 54.2.2, 54.3.1)"⟩,
-  ⟨26, "Dominator Tree Updates", 1, .analysis, .fv1, "the analysis predicate/instance defined in RV8FV/Passes1.lean", "FV-1: definition complete; semantic over-approximation tracked (CEP&CC 54.2.2)"⟩,
-  ⟨27, "Post-Dominator Analysis", 1, .analysis, .fv1, "the analysis predicate/instance defined in RV8FV/Passes1.lean", "FV-1: definition complete; semantic over-approximation tracked (CEP&CC 54.2.2)"⟩,
-  ⟨28, "Natural Loop Detection", 1, .analysis, .fv1, "the analysis predicate/instance defined in RV8FV/Passes1.lean", "FV-1: definition complete; semantic over-approximation tracked (CEP&CC 54.2.2)"⟩,
-  ⟨29, "Reducibility Testing", 1, .analysis, .fv1, "the analysis predicate/instance defined in RV8FV/Passes1.lean", "FV-1: definition complete; semantic over-approximation tracked (CEP&CC 54.2.2)"⟩,
-  ⟨30, "Control Dependence Graph Construction", 1, .analysis, .fv1, "the analysis predicate/instance defined in RV8FV/Passes1.lean", "FV-1: definition complete; semantic over-approximation tracked (CEP&CC 54.2.2)"⟩,
+  ⟨26, "Dominator Tree Updates", 1, .analysis, .fv0, "Dominates of RV8FV/CFG.lean; FV-0: dominates_trans (dominator-tree order), dominates_reach, dominates_refl", "FV-0: machine-checked theorems referenced above"⟩,
+  ⟨27, "Post-Dominator Analysis", 1, .analysis, .fv0, "PostDominates of RV8FV/CFG.lean; FV-0: postDominates_trans (side condition: the join is not an exit)", "FV-0: machine-checked theorems referenced above"⟩,
+  ⟨28, "Natural Loop Detection", 1, .analysis, .fv0, "BackEdge/InLoopBody of RV8FV/CFG.lean; FV-0: loopBody_reaches_header (the body is cycle-closed), loopBody_header", "FV-0: machine-checked theorems referenced above"⟩,
+  ⟨29, "Reducibility Testing", 1, .analysis, .fv0, "Reducible of RV8FV/CFG.lean (DFS-free form); FV-0: reducible_backEdge (every reachable retreating edge is a back edge)", "FV-0: machine-checked theorems referenced above"⟩,
+  ⟨30, "Control Dependence Graph Construction", 1, .analysis, .fv0, "ControlDependent of RV8FV/CFG.lean (FOW form); FV-0: controlDependent_reaches (the CD edge is reachability-witnessed)", "FV-0: machine-checked theorems referenced above"⟩,
   ⟨31, "Global Value Numbering (GVN)", 2, .systemLevel, .fv1, "the transformation/system contract defined in RV8FV/Passes2.lean", "FV-1: definition complete; run-level equivalence tracked (CEP&CC 54.2.2, 54.3.1)"⟩,
   ⟨32, "Sparse Conditional Constant Propagation (SCCP)", 2, .systemLevel, .fv0, "sccp of RV8FV/Passes2.lean; FV-0: sccpSweep_stable (SCCP lattice fixpoint), sccpJoin_comm/idem/bot_left", "FV-0: machine-checked theorems referenced above"⟩,
   ⟨33, "Dead Store Elimination", 2, .systemLevel, .fv1, "the transformation/system contract defined in RV8FV/Passes2.lean", "FV-1: definition complete; run-level equivalence tracked (CEP&CC 54.2.2, 54.3.1)"⟩,
@@ -292,6 +292,6 @@ theorem frames_first_last : frames.head!.id = 1 ∧ frames.getLast!.id = 176 := 
 def fv0Frames : List Nat := (frames.filter (fun p => p.fv = .fv0)).map PassFrame.id
 
 set_option maxRecDepth 8192 in
-theorem fv0Frames_value : fv0Frames = [13, 20, 32, 34, 35, 38, 39, 40, 41, 42, 45, 46, 49, 56, 57, 58, 59, 60, 61, 65, 66, 68, 69, 133] := by decide
+theorem fv0Frames_value : fv0Frames = [13, 20, 26, 27, 28, 29, 30, 32, 34, 35, 38, 39, 40, 41, 42, 45, 46, 49, 56, 57, 58, 59, 60, 61, 65, 66, 68, 69, 133] := by decide
 
 end RV8FV
