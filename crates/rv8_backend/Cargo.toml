@@ -1,9 +1,12 @@
 # CEP:FILE: crates/rv8_backend/Cargo.toml
 # CEP:WHAT: Manifest for rv8_backend, the transition-6.4 pipeline (isel, MCF regalloc,
 #   rewrite, schedule, verify, encode) plus the in-process JIT execution path (RV8-141).
-# CEP:WHY: Workspace members must exist before implementation lands; the JIT execution
-#   tests execute emitted bytes through rv8_runtime::jitmem, so the runtime is a
-#   dev-dependency (host test harness only, never linked into compiled programs).
+# CEP:WHY: STANDARDS 5.13 names rv8_backend a home of the JIT hybrid: src/jit.rs (the
+#   emitter's instruction path) compiles LIR through the AOT oracle and resolves
+#   relocations into rv8_runtime::jitmem W^X memory, so the runtime is a real
+#   dependency of the compiler-side JIT tier. The runtime stays out of the object path:
+#   the driver's --emit obj/run pipeline never touches jitmem, and pure-AOT output is
+#   byte-identical with the JIT disabled (pinned by the jit tests).
 # CEP:CLASS: HPC-1
 # CEP:STATUS: complete
 # CEP:OWNER: axiomzero2
@@ -24,6 +27,4 @@ rv8_isl = { path = "../rv8_isl" }
 rv8_core = { workspace = true }
 rv8_ir = { workspace = true }
 rv8_middle = { workspace = true }
-
-[dev-dependencies]
 rv8_runtime = { path = "../rv8_runtime" }

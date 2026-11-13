@@ -29,12 +29,14 @@ pub mod abi;
 pub mod encode;
 pub mod error;
 pub mod isel;
+pub mod jit;
 pub mod regalloc;
 pub mod schedule;
 
 pub use encode::{call_symbol_name, emit_function, CodegenOutput, RelocKind, Relocation};
 pub use error::BackendError;
 pub use isel::{select, select_with_model, TargetCostModel, X86CostModel, MAX_CHAIN_DEPTH, VREG_BASE};
+pub use jit::{resolve_relocs, JitEmitterError, JitFunction, JitModule, JitModuleConfig, ResolvedPatch};
 pub use regalloc::{allocate, rewrite, FramePlan, CAP_INFINITE};
 pub use schedule::schedule;
 

@@ -567,6 +567,60 @@ impl CodePool {
             .patch(offset, bytes)
     }
 
+    /// CEP:WHAT: Raw base address of one page in the segment list, available BEFORE
+    ///   finalization.
+    /// CEP:WHY: Relocation resolution computes absolute displacements (S + A - P for
+    ///   PcRel32) while the page is still writable, so patch sites are resolved before
+    ///   the W^X flip per the module SECURITY contract (a finalized page never carries
+    ///   an unresolved address). code_ptr() stays finalize-gated for execution; this
+    ///   accessor is the write-phase exception for the emitter only.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: OffsetOutOfRange for an unknown page index.
+    /// CEP:ASSUMES: callers use the address for relocation arithmetic and writes through
+    ///   write/bump_emit, never for execution.
+    /// CEP:COST: O(1).
+    /// CEP:EVIDENCE: page_addr_reports_write_phase_base unit test; the rv8_backend jit
+    ///   module resolves cross-page call displacements through it.
+    pub fn page_addr(&self, page: usize) -> Result<*const u8, JitError> {
+        self.pages
+            .get(page)
+            .map(|p| p.addr as *const u8)
+            .ok_or(JitError::OffsetOutOfRange)
+    }
+
+    /// CEP:WHAT: Pre-finalize in-slot write: overwrite `bytes` at `in_slot` inside one
+    ///   already-emitted body, refused once the pool finalized and bounded by the slot's
+    ///   own length.
+    /// CEP:WHY: The relocation resolver patches call sites after every body is emitted
+    ///   but before the W^X flip; the slot-length bound keeps one body's patches from
+    ///   ever reaching a neighbor's bytes.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: WriteAfterFinalize (through the page), OffsetOutOfRange (unknown
+    ///   page, or site plus length beyond the slot), BadCapacity (empty bytes).
+    /// CEP:ASSUMES: none
+    /// CEP:COST: O(bytes) copy.
+    /// CEP:EVIDENCE: write_slot_* unit tests below; the jit module applies every
+    ///   relocation through this before finalize_all.
+    pub fn write_slot(
+        &mut self,
+        slot: CodeSlot,
+        in_slot: usize,
+        bytes: &[u8],
+    ) -> Result<(), JitError> {
+        if bytes.is_empty() {
+            return Err(JitError::BadCapacity);
+        }
+        let in_end = in_slot.checked_add(bytes.len()).ok_or(JitError::OffsetOutOfRange)?;
+        if in_end > slot.len {
+            return Err(JitError::OffsetOutOfRange);
+        }
+        let offset = slot.offset.checked_add(in_slot).ok_or(JitError::OffsetOutOfRange)?;
+        self.pages
+            .get_mut(slot.page)
+            .ok_or(JitError::OffsetOutOfRange)?
+            .write(offset, bytes)
+    }
+
     /// CEP:WHAT: Drops one live reference for a slot (the code became unreachable).
     /// CEP:WHY: Reclamation bookkeeping (design 3.2).
     /// CEP:STATUS: complete
@@ -762,6 +816,59 @@ mod tests {
         pool.drop_slot_ref(b3);
         assert_eq!(pool.reclaim_cold(), 1);
         assert_eq!(pool.page_count(), 1);
+    }
+
+    /// CEP:WHAT: page_addr reports the write-phase base of a known page and refuses
+    ///   unknown indexes.
+    /// CEP:STATUS: complete
+    /// CEP:EVIDENCE: this test.
+    #[test]
+    fn page_addr_reports_write_phase_base() {
+        let mut pool = CodePool::new(PAGE_SIZE, 1).expect("pool");
+        assert_eq!(pool.page_addr(0).unwrap_err(), JitError::OffsetOutOfRange);
+        let slot = pool.emit(&x86_mov_eax_ret(1)).expect("emit");
+        let base = pool.page_addr(slot.page).expect("write-phase base");
+        assert_eq!(slot.offset, 0, "first body starts at the page base");
+        // SAFETY: the page is mapped read-write; reading the first emitted byte.
+        assert_eq!(unsafe { *base }, 0xB8, "page base addresses the emitted body");
+        assert_eq!(pool.page_addr(9).unwrap_err(), JitError::OffsetOutOfRange);
+    }
+
+    /// CEP:WHAT: write_slot rewrites bytes of one emitted body before finalize and the
+    ///   change is observable in execution after finalize.
+    /// CEP:STATUS: complete
+    /// CEP:EVIDENCE: this test.
+    #[test]
+    fn write_slot_patches_before_finalize_and_executes() {
+        let mut pool = CodePool::new(PAGE_SIZE, 1).expect("pool");
+        let slot = pool.emit(&x86_mov_eax_ret(1)).expect("emit");
+        pool.write_slot(slot, 1, &[77]).expect("pre-finalize patch");
+        pool.finalize_all().expect("rx");
+        // SAFETY: finalized `mov eax, 77; ret` body.
+        let f: extern "C" fn() -> i64 =
+            unsafe { core::mem::transmute(pool.code_ptr(slot).expect("ptr")) };
+        assert_eq!(f(), 77);
+    }
+
+    /// CEP:WHAT: write_slot is bounded by the slot length and refused after finalize.
+    /// CEP:STATUS: complete
+    /// CEP:EVIDENCE: this test.
+    #[test]
+    fn write_slot_is_bounded_by_the_slot() {
+        let mut pool = CodePool::new(PAGE_SIZE, 1).expect("pool");
+        let a = pool.emit(&x86_mov_eax_ret(1)).expect("a");
+        let b = pool.emit(&x86_mov_eax_ret(2)).expect("b");
+        // Slot a is 6 bytes: a 2-byte write ending at 6 fits, starting at 6 does not.
+        pool.write_slot(a, 4, &[0, 0]).expect("inside slot a");
+        assert_eq!(pool.write_slot(a, 6, &[0]).unwrap_err(), JitError::OffsetOutOfRange);
+        // A write addressed at slot a can never reach slot b's bytes.
+        let _ = b;
+        pool.finalize_all().expect("rx");
+        assert_eq!(
+            pool.write_slot(a, 0, &[0x90]).unwrap_err(),
+            JitError::WriteAfterFinalize
+        );
+        assert_eq!(pool.write_slot(a, 0, &[]).unwrap_err(), JitError::BadCapacity);
     }
 
     /// CEP:WHAT: The mov-eax/ret probe executes in finalized memory and returns the
