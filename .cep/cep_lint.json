@@ -233,6 +233,14 @@
       "check": "doc_rule_coverage",
       "doc_path": "standard.md",
       "heading_pattern": "^### Rule (CEP-LINT-[A-Z-]+)$"
+    },
+    "CEP-LINT-HUNT-RECEIPT": {
+      "severity": 0,
+      "check": "commit_hunt_manifest"
+    },
+    "CEP-LINT-HUNTER-RECEIPT": {
+      "severity": 0,
+      "check": "hunter_manifest"
     }
   }
 }

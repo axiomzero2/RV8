@@ -482,8 +482,8 @@ pub struct Loops {
 pub fn detect_loops(cfg: &ControlFlowGraph, doms: &Dominators) -> Result<Loops, MiddleError> {
     let n = cfg.block_count as usize;
     let mut back_edges: Vec<(BlockId, BlockId)> = Vec::new();
-    for b in 0..n {
-        for &s in &cfg.succs[b] {
+    for (b, outs) in cfg.succs.iter().enumerate().take(n) {
+        for &s in outs {
             if s == BlockId(b as u32) || doms.strictly_dominates(s, BlockId(b as u32)) {
                 back_edges.push((BlockId(b as u32), s));
             }

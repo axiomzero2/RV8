@@ -675,7 +675,7 @@ pub(crate) mod tests {
         assert_eq!(config.exit_codes.usage, 3);
         assert_eq!(config.file_globs.len(), 3);
         assert!(config.file_globs.contains(&"crates/**/*.rs".to_string()));
-        assert_eq!(config.rules.len(), 19);
+        assert_eq!(config.rules.len(), 21);
         let header = config
             .rule_by_check("comment_block_schema", Some("file_header"))
             .expect("file header rule");
@@ -712,6 +712,16 @@ pub(crate) mod tests {
         assert_eq!(atomic.max_registrations_per_file, 1);
         assert_eq!(atomic.max_isel_categories_per_file, 1);
         assert!(atomic.generated_pattern.is_some());
+        let hunt = config
+            .rule_by_check("commit_hunt_manifest", None)
+            .expect("hunt receipt rule");
+        assert_eq!(hunt.id, "CEP-LINT-HUNT-RECEIPT");
+        assert_eq!(hunt.severity, 0);
+        let hunter = config
+            .rule_by_check("hunter_manifest", None)
+            .expect("hunter receipt rule");
+        assert_eq!(hunter.id, "CEP-LINT-HUNTER-RECEIPT");
+        assert_eq!(hunter.severity, 0);
     }
 
     #[test]

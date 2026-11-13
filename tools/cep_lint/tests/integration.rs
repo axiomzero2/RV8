@@ -66,7 +66,7 @@ fn write_config(root: &Path) -> PathBuf {
     path
 }
 
-const CONFIGURED_RULE_IDS: [&str; 19] = [
+const CONFIGURED_RULE_IDS: [&str; 21] = [
     "CEP-LINT-FILE-HEADER",
     "CEP-LINT-FUNC-BLOCK",
     "CEP-LINT-STATUS-VALUE",
@@ -86,6 +86,8 @@ const CONFIGURED_RULE_IDS: [&str; 19] = [
     "CEP-LINT-COMMENTED-CODE",
     "CEP-LINT-ATOMIC-FILE",
     "CEP-LINT-DOC-SYNC",
+    "CEP-LINT-HUNT-RECEIPT",
+    "CEP-LINT-HUNTER-RECEIPT",
 ];
 
 const GOOD_RS: &str = "\

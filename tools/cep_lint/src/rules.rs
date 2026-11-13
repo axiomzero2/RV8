@@ -129,6 +129,12 @@ pub fn run_file_rules(config: &Config, path: &str, scan: &FileScan) -> Vec<Findi
             "macro_prefix_policy" => findings.extend(macro_prefix(rule, &ctx)),
             "key_vocabulary" => findings.extend(key_vocabulary(rule, &ctx)),
             "file_topology_policy" => findings.extend(file_topology(rule, &ctx)),
+            // Chapter 65 (Bloodhound/HUNTER): both receipt checks are active only under
+            // the --verify-hunt invocation, which this build does not implement yet
+            // (STANDARDS RV8-150); outside that mode the configured rules are dormant by
+            // specification, so a normal run emits no findings for them.
+            "commit_hunt_manifest" => {}
+            "hunter_manifest" => {}
             _ => {}
         }
     }

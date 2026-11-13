@@ -449,6 +449,26 @@
     "targets/x86/isel/arithmetic.rs": "// isel-category: arithmetic\nselect(n);\n"
    },
    "expect_findings": {}
+  },
+  {
+   "name": "hunt_receipt_dormant_without_verify_hunt_is_clean",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-HUNT-RECEIPT\":{\"severity\":0,\"check\":\"commit_hunt_manifest\"}}}",
+   "files": {
+    "hot/decoder.cpp": "void decode(uint8_t op) { step(op); }\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-HUNT-RECEIPT": 0
+   }
+  },
+  {
+   "name": "hunter_receipt_dormant_without_verify_hunt_is_clean",
+   "config": "{\"standard\":{\"name\":\"CEP&CC\",\"version\":\"0.4\",\"source\":\"standard.md\"},\"file_globs\":[\"**/*\",\"*\"],\"rules\":{\"CEP-LINT-HUNTER-RECEIPT\":{\"severity\":0,\"check\":\"hunter_manifest\"}}}",
+   "files": {
+    "hot/airlock.cpp": "bool airlock(size_t len) { return len <= 4096; }\n"
+   },
+   "expect_findings": {
+    "CEP-LINT-HUNTER-RECEIPT": 0
+   }
   }
  ]
 }

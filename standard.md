@@ -12203,6 +12203,18 @@ Parameters: `doc_path`, `heading_pattern`, `version_pattern`.
 
 ---
 
+### Rule CEP-LINT-ATOMIC-FILE
+
+**Severity 1. Sections: 62.1, 62.3, 62.4, 62.5. Check: `file_topology_policy`.**
+
+Chapter 62's atomic-file mandate is enforced mechanically as four duties. (1) A file whose declared `CEP:CLASS` carries a configured line limit must not exceed it: 62.5.1 bounds `CEP-0` at 400 lines, `CEP-1` at 800, and `CEP-2` at 1200 per translation unit. (2) A file whose name stem contains a banned junk-drawer stem (`util`, `helper`, `misc`, `common`) is rejected (62.4). (3) A file under the configured passes topology registers at most one optimization pass (62.3.1, 62.5.3). (4) A file under the configured ISEL topology declares at most one instruction-class category through its category tag (62.3.3, 62.5.3).
+
+Parameters: `class_line_limits`, `banned_name_stems`, `passes_globs`, `pass_registration_pattern`, `max_registrations_per_file`, `isel_globs`, `isel_category_pattern`, `max_isel_categories_per_file`, `generated_pattern`.
+
+Limits: 62.5.1 names limits only for the CEP-0/1/2 classes; the other declared classes (`HPC-0` through `HPC-2`, `RCS-0` through `RCS-2`, `CC`, `FFI`) have no configured mechanical line limit in 0.4 and remain review-governed until a revision names their bounds. A file whose opening lines match `generated_pattern` (the deterministic-tool marker of 62.5.1) is exempt from the line limits only, never from the other duties. In Rust sources the pass registration is any code line matching `pass_registration_pattern` (the `register_pass!`-style analog of a `.cpp` pass registration), and the ISEL category is the single capture group of `isel_category_pattern` matched over whole lines, because the spec's category tags live in comments; distinct captures count, repeats of one category do not. The topology duties fire only under the configured globs; this repository's flat backend (`crates/rv8_backend/src/isel.rs` and its siblings) does not use the `passes/` or `targets/*/isel/` topology, so those duties are exercised by the self-test manifest until such a topology exists here.
+
+---
+
 ## 50.4 Bootstrap error codes
 
 Failures that occur before message templates are loaded print `CEP-LINT-BOOT-<n>` with a detail string:
