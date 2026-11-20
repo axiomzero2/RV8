@@ -26,6 +26,7 @@
 //   iterative or budget-bounded); no external dependencies.
 
 pub mod abi;
+pub mod deopt;
 pub mod encode;
 pub mod error;
 pub mod isel;
@@ -37,6 +38,11 @@ pub use encode::{call_symbol_name, emit_function, CodegenOutput, RelocKind, Relo
 pub use error::BackendError;
 pub use isel::{select, select_with_model, TargetCostModel, X86CostModel, MAX_CHAIN_DEPTH, VREG_BASE};
 pub use jit::{resolve_relocs, JitEmitterError, JitFunction, JitModule, JitModuleConfig, ResolvedPatch};
+pub use deopt::{
+    decode_state, deopt_state_at, deopt_states, encode_state, regions_of, DeoptLocation,
+    DeoptState, DeoptTable, FunctionDeopt, GuardSite, GuardState, Region, RegionId,
+    MAX_DEOPT_STATE_ENTRIES, MIN_REGION_INSTRUCTIONS,
+};
 pub use regalloc::{allocate, rewrite, FramePlan, CAP_INFINITE};
 pub use schedule::schedule;
 

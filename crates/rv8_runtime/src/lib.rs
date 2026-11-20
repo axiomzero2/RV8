@@ -37,6 +37,7 @@ pub mod jitmem;
 pub mod option;
 pub mod panic;
 pub mod traits;
+pub mod trap;
 pub mod vec;
 
 pub use allocator::{AllocError, Allocator, Layout};

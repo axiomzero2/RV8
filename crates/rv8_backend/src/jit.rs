@@ -33,9 +33,12 @@
 //   patch-time call-site redirect; layout determinism; executed bytes equal linked AOT
 //   bytes).
 
+use crate::deopt::{deopt_state_at, deopt_states, regions_of, DeoptTable, FunctionDeopt, GuardSite, GuardState};
 use crate::encode::call_symbol_name;
-use crate::{compile_lir, BackendError, CodegenOutput, RelocKind, Relocation};
-use rv8_ir::lir::LirFunction;
+use crate::{BackendError, CodegenOutput, RelocKind, Relocation};
+use rv8_ir::lir::{LirFunction, RegisterAllocation};
+use rv8_ir::machir::MachineIrFunction;
+use crate::regalloc::FramePlan;
 use rv8_runtime::jitmem::{CodePool, CodeSlot, JitError};
 use std::collections::BTreeMap;
 
@@ -62,6 +65,9 @@ pub enum JitEmitterError {
     AmbiguousSymbol { symbol: String },
     /// The same module-local ordinal was declared twice in build()'s input.
     DuplicateOrdinal { ordinal: i64 },
+    /// A guard site failed validation: a function index, block index, program point,
+    /// code offset, or region reference outside the built module.
+    InvalidGuard { reason: String },
     /// A PcRel32 displacement does not fit in 32 bits (targets beyond +/-2GiB; pools in
     /// this tier are small, so this fires only on genuinely unreachable layouts).
     RelocOutOfRange { symbol: String, value: i64 },
@@ -84,6 +90,9 @@ impl std::fmt::Display for JitEmitterError {
             }
             JitEmitterError::DuplicateOrdinal { ordinal } => {
                 write!(f, "jit emitter: ordinal {ordinal} declared twice in the module")
+            }
+            JitEmitterError::InvalidGuard { reason } => {
+                write!(f, "jit emitter: invalid guard site: {reason}")
             }
             JitEmitterError::RelocOutOfRange { symbol, value } => {
                 write!(f, "jit emitter: {symbol} displacement {value} exceeds rel32 range")
@@ -200,6 +209,51 @@ pub fn resolve_relocs(
     Ok(out)
 }
 
+/// CEP:WHAT: One function's full pipeline intermediates: the emitted bytes plus the
+///   scheduled MIR, the register allocation, and the frame plan they came from.
+/// CEP:WHY: build_with_deopt derives regions and deopt states from the same
+///   intermediates the executed bytes came from - one pipeline run, one source of
+///   truth (design 1.4's no-redundant-analysis rule).
+/// CEP:STATUS: complete
+/// CEP:FAILURE: none
+/// CEP:ASSUMES: the MIR is the scheduled, verified form; allocation and frame are the
+///   rewrite's own products.
+/// CEP:COST: owned buffers, one set per function.
+/// CEP:EVIDENCE: build_with_deopt and the trap witness.
+struct CompiledStages {
+    /// The emitted bytes (what the pool received).
+    out: CodegenOutput,
+    /// The scheduled, verified Machine IR.
+    mir: MachineIrFunction,
+    /// The allocation the rewrite consumed.
+    alloc: RegisterAllocation,
+    /// The frame plan the rewrite produced.
+    layout: FramePlan,
+}
+
+/// CEP:WHAT: compile_lir's exact stage sequence with the intermediates retained:
+///   isel::select -> regalloc::allocate -> regalloc::rewrite -> schedule -> verify ->
+///   encode::emit_function.
+/// CEP:WHY: Byte-identical to compile_lir by construction (same stages, same order);
+///   the JIT table needs the intermediates, so the pipeline runs once with everything
+///   retained instead of twice.
+/// CEP:STATUS: complete
+/// CEP:FAILURE: BackendError from any stage, threaded through JitEmitterError.
+/// CEP:ASSUMES: same as compile_lir.
+/// CEP:COST: the pipeline cost, once.
+/// CEP:EVIDENCE: the executed bytes and the table describe one run (trap witness).
+fn compile_stages(lir: &LirFunction, symbol: &str) -> Result<CompiledStages, JitEmitterError> {
+    let mut mir = crate::isel::select(lir)?;
+    let alloc = crate::regalloc::allocate(lir)?;
+    let layout = crate::regalloc::rewrite(&mut mir, lir, &alloc)?;
+    crate::schedule(&mut mir)?;
+    mir.verify().map_err(|e| JitEmitterError::Backend(BackendError::Verification {
+        detail: format!("{e:?}"),
+    }))?;
+    let out = crate::encode::emit_function(&mir, symbol)?;
+    Ok(CompiledStages { out, mir, alloc, layout })
+}
+
 /// CEP:WHAT: Pool geometry for a JIT module (page capacity and page budget of the
 ///   underlying CodePool).
 /// CEP:WHY: Budgets are the repo norm (fail closed, never allocate unbounded); the
@@ -278,6 +332,33 @@ impl JitModule {
         externs: &[(i64, usize)],
         cfg: JitModuleConfig,
     ) -> Result<Self, JitEmitterError> {
+        Ok(Self::build_with_deopt(fns, externs, &[], cfg)?.0)
+    }
+
+    /// CEP:WHAT: build() plus the deopt metadata table (design 1.2-1.3, RV8-141): every
+    ///   function's machine-CFG region partition, the per-region entry states, and
+    ///   every guard site's exact point state - all derived from the same pipeline
+    ///   intermediates the executed bytes came from (one pipeline run, one source of
+    ///   truth), with every guard validated against what was actually built.
+    /// CEP:WHY: STANDARDS 5.13 clause 2: the deopt tier needs states that describe the
+    ///   executed code, not a parallel compilation; deriving them from the retained
+    ///   MIR/allocation/frame of the very pipeline run that produced the bytes is the
+    ///   no-redundant-analysis rule of design 1.4.
+    /// CEP:STATUS: complete
+    /// CEP:FAILURE: build()'s failures plus InvalidGuard for a site referencing a
+    ///   function, block, point, offset, or region the module does not contain.
+    /// CEP:ASSUMES: guard points are LIR block indices and instruction ordinals within
+    ///   them (the LIR block list order mirrors the layout).
+    /// CEP:COST: build()'s cost plus O(V + E) partition and O(values) liveness per
+    ///   function and per guard.
+    /// CEP:EVIDENCE: tests/jit_deopt.rs executes a guard trap end to end and checks the
+    ///   captured state against hand-computed liveness.
+    pub fn build_with_deopt(
+        fns: &[(i64, LirFunction)],
+        externs: &[(i64, usize)],
+        guards: &[GuardSite],
+        cfg: JitModuleConfig,
+    ) -> Result<(JitModule, DeoptTable), JitEmitterError> {
         if fns.is_empty() {
             return Err(JitEmitterError::EmptyModule);
         }
@@ -302,17 +383,22 @@ impl JitModule {
             }
         }
         // Compile every body through the AOT oracle before any memory maps: a rejected
-        // LIR leaves no pages behind.
-        let mut compiled: Vec<(i64, CodegenOutput)> = Vec::with_capacity(ordered.len());
+        // LIR leaves no pages behind. The intermediates are retained for the deopt
+        // metadata - the same run, no second compilation.
+        let mut compiled: Vec<CompiledStages> = Vec::with_capacity(ordered.len());
         for (ord, lir) in &ordered {
-            let out = compile_lir(lir, &call_symbol_name(*ord))?;
-            compiled.push((*ord, out));
+            let stages = compile_stages(lir, &call_symbol_name(*ord))?;
+            compiled.push(stages);
         }
         let mut pool = CodePool::new(cfg.page_cap, cfg.max_pages)?;
         let mut functions = Vec::with_capacity(compiled.len());
-        for (ord, out) in &compiled {
-            let slot = pool.emit(&out.code)?;
-            functions.push(JitFunction { ordinal: *ord, slot, code_len: out.code.len() });
+        for (i, cs) in compiled.iter().enumerate() {
+            let slot = pool.emit(&cs.out.code)?;
+            functions.push(JitFunction {
+                ordinal: ordered[i].0,
+                slot,
+                code_len: cs.out.code.len(),
+            });
         }
         // Symbol table: module-local slots first (their addresses are the write-phase
         // page bases), the function table as fallback.
@@ -321,8 +407,8 @@ impl JitModule {
             let base = pool.page_addr(f.slot.page)? as usize + f.slot.offset;
             symbols.insert(call_symbol_name(f.ordinal), base);
         }
-        for f in &functions {
-            let out = &compiled.iter().find(|(o, _)| *o == f.ordinal).expect("paired").1;
+        for (i, f) in functions.iter().enumerate() {
+            let out = &compiled[i].out;
             let resolve = |symbol: &str| -> Result<usize, JitEmitterError> {
                 symbols
                     .get(symbol)
@@ -338,7 +424,51 @@ impl JitModule {
             }
         }
         pool.finalize_all()?;
-        Ok(JitModule { pool, functions })
+        // Deopt metadata (design 1.2-1.3), from the retained intermediates.
+        let mut table_functions = Vec::with_capacity(compiled.len());
+        for (i, cs) in compiled.iter().enumerate() {
+            let lir = ordered[i].1;
+            let regions = regions_of(&cs.mir.blocks)?;
+            let states = deopt_states(lir, &cs.alloc, &cs.layout, &regions)?;
+            table_functions.push(FunctionDeopt { regions, states });
+        }
+        let mut guard_states = Vec::with_capacity(guards.len());
+        for g in guards {
+            if g.function as usize >= compiled.len() {
+                return Err(JitEmitterError::InvalidGuard { reason: format!(
+                    "function index {} beyond {} functions", g.function, compiled.len())
+                });
+            }
+            let cs = &compiled[g.function as usize];
+            let lir = ordered[g.function as usize].1;
+            if g.block as usize >= lir.blocks.len() {
+                return Err(JitEmitterError::InvalidGuard { reason: format!(
+                    "block {} beyond {} LIR blocks", g.block, lir.blocks.len())
+                });
+            }
+            if g.point as usize > lir.blocks[g.block as usize].instructions.len() {
+                return Err(JitEmitterError::InvalidGuard { reason: format!(
+                    "point {} beyond block {}'s instructions", g.point, g.block)
+                });
+            }
+            if g.code_offset as usize >= cs.out.code.len() {
+                return Err(JitEmitterError::InvalidGuard { reason: format!(
+                    "code offset {} beyond {} code bytes", g.code_offset, cs.out.code.len())
+                });
+            }
+            let regions = &table_functions[g.function as usize].regions;
+            if !regions.iter().any(|r| r.id == g.region) {
+                return Err(JitEmitterError::InvalidGuard { reason: format!(
+                    "region {:?} is not one of function {}'s regions", g.region, g.function)
+                });
+            }
+            let state = deopt_state_at(lir, &cs.alloc, &cs.layout, g.block, g.point as usize, g.region)?;
+            guard_states.push(GuardState { site: *g, state });
+        }
+        Ok((
+            JitModule { pool, functions },
+            DeoptTable { functions: table_functions, guards: guard_states },
+        ))
     }
 
     /// CEP:WHAT: Executable entry for `ordinal` (finalized pool only).
